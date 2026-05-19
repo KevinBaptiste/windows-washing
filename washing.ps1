@@ -111,38 +111,7 @@ function Invoke-Step {
  
 # ─── Étape 1 : PowerShell 7 ───────────────────────────────────────────────────
  
-function Step-PowerShell7 {
-    Write-Step "PowerShell 7 — dernière version"
- 
-    if (-not (Test-InternetAccess)) { Write-Warn "Pas d'accès Internet."; return }
- 
-    $rel       = Invoke-RestMethod 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest' -TimeoutSec 10
-    $latestVer = [version]$rel.tag_name.TrimStart('v')
-    $arch      = Get-SystemArch
- 
-    $pwshCmd = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-    if ($pwshCmd) {
-        $currentVer = [version]$pwshCmd.Version.ToString()
-        if ($currentVer -ge $latestVer) {
-            Write-Skip "PowerShell $currentVer déjà à jour."
-            return
-        }
-        Write-Info "Version actuelle : $currentVer → cible : $latestVer"
-    }
- 
-    if (-not (Confirm-Action "  Installer PowerShell $latestVer ($arch) ?")) {
-        Write-Skip "Étape ignorée."; return
-    }
- 
-    $asset = $rel.assets | Where-Object { $_.name -like "*win-$arch.msi" } | Select-Object -First 1
-    if (-not $asset) { throw "Aucun MSI trouvé pour l'architecture $arch." }
- 
-    $msi = Join-Path $Script:WorkDir $asset.name
-    Invoke-SafeDownload -Url $asset.browser_download_url -Destination $msi -Label $asset.name
-    Write-Info "Installation MSI…"
-    Invoke-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$msi`"", '/quiet', '/norestart') -SuccessCodes @(0, 3010)
-    Write-OK "PowerShell $latestVer installé (relancer le terminal)."
-}
+winget install --id Microsoft.PowerShell --source winget
  
 # ─── Étape 2 : Win11Debloat ───────────────────────────────────────────────────
  
