@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Préparation automatisée d'un poste Windows.
 .DESCRIPTION
