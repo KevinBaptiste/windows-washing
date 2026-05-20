@@ -376,11 +376,28 @@ function Invoke-DebloatStep {
     }
 
     # Exécution silencieuse depuis le dossier extrait (dépendances trouvées via $PSScriptRoot).
+    # Win11Debloat écrit des messages informatifs sur stderr (registre, MSIX) qui, combinés
+    # à $ErrorActionPreference = 'Stop', sont levés comme exceptions. On isole donc l'appel
+    # avec un ErrorActionPreference local à 'Continue' pour ne pas faire échouer l'étape.
     $runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
-        $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing 2>&1 | Out-String
-        if (-not [string]::IsNullOrWhiteSpace($output)) {
-            $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
-            Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
+        $previousEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            # Redirection complète des flux ; les "erreurs" non terminantes sont capturées comme texte.
+            $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing *>&1 | Out-String
+
+            # Vérification du code de sortie réel du script (et non du flux stderr).
+            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+                throw "Win11Debloat ExitCode = $LASTEXITCODE"
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($output)) {
+                $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
+                Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
+            }
+        }
+        finally {
+            $ErrorActionPreference = $previousEAP
         }
     }
 
@@ -451,7 +468,7 @@ function Install-GoogleChrome {
         Add-Failure -StepLabel $label -Reason "Installation Google Chrome en échec."
     }
 }
-
+<
 function Install-Microsoft365 {
     <#
     .SYNOPSIS
