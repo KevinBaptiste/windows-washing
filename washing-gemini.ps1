@@ -61,7 +61,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 # Constantes globales
 $Script:TempDir          = $env:TEMP
 $Script:LogPath          = Join-Path ([Environment]::GetFolderPath('Desktop')) ("PrepW11_Rapport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-$Script:Win11DebloatUrl  = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/main/Win11Debloat.ps1'
+$Script:Win11DebloatUrl  = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/refs/heads/master/Win11Debloat.ps1'
 
 # Initialisation des listes pour le logging (Compatible PowerShell 5.1)
 $Script:LogEntries = New-Object System.Collections.Generic.List[string]
@@ -210,6 +210,11 @@ function Install-Microsoft365 {
     $label = "Étape 2 — Microsoft 365 Famille FR"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
 
+    # 2.a Nettoyage préventif des processus d'installation d'office qui pourraient être bloqués
+    Write-LogEntry -Message "$label : Nettoyage des processus d'installation résiduels..." -Level INFO
+    Get-Process -Name "setup", "OfficeClickToRun" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+    # Désinstallation des Office existants via OfficeClickToRun
     $c2rExe = Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
     if (-not (Test-Path -LiteralPath $c2rExe)) {
         $c2rExe = Join-Path $env:ProgramFiles 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
@@ -226,6 +231,7 @@ function Install-Microsoft365 {
         }
     }
 
+    # 2.b Installation de l'Office Deployment Tool via Winget
     $odtOk = Invoke-WithRetry -Label "$label (ODT install)" -Action {
         $args = @('install', '--id', 'Microsoft.OfficeDeploymentTool',
                   '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements')
@@ -240,12 +246,14 @@ function Install-Microsoft365 {
         return
     }
 
+    # 2.c Localisation de setup.exe
     $setupPath = Find-OdtSetup
     if (-not $setupPath) {
         Add-Failure -StepLabel $label -Reason "setup.exe ODT introuvable après installation."
         return
     }
 
+    # 2.d Génération du XML de configuration optimisé anti-blocage
     $configPath = Join-Path $Script:TempDir 'configuration-install.xml'
     $xmlContent = @'
 <Configuration>
@@ -258,20 +266,41 @@ function Install-Microsoft365 {
   </Add>
   <Display Level="None" AcceptEULA="TRUE" />
   <Property Name="AUTOACTIVATE" Value="0" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+  <Property Name="SharedComputerLicensing" Value="0" />
   <RemoveMSI />
 </Configuration>
 '@
     Set-Content -LiteralPath $configPath -Value $xmlContent -Encoding UTF8
 
+    # 2.e Lancement de l'installation avec gestion de Timeout (Garantit l'absence de blocage infini)
     $installOk = Invoke-WithRetry -Label "$label (M365 install)" -Action {
+        Write-LogEntry -Message "$label : Exécution de setup.exe /configure (Timeout max : 15 min)..." -Level INFO
+        
         $proc = Start-Process -FilePath $setupPath `
                               -ArgumentList '/configure', "`"$configPath`"" `
-                              -Wait -PassThru -NoNewWindow
-        if ($proc.ExitCode -ne 0) { throw "ODT /configure ExitCode = $($proc.ExitCode)" }
+                              -PassThru -NoNewWindow
+        
+        # Attente maximale de 900 secondes (15 minutes)
+        $timeoutSec = 900
+        $counter = 0
+        while (-not $proc.HasExited -and $counter -lt $timeoutSec) {
+            Start-Sleep -Seconds 2
+            $counter += 2
+        }
+
+        if (-not $proc.HasExited) {
+            Write-LogEntry -Message "$label : Timeout de 15 minutes atteint. Arrêt forcé du processus d'installation." -Level ERROR
+            $proc | Stop-Process -Force
+            throw "L'installation a dépassé le délai imparti de 15 minutes."
+        }
+        else {
+            if ($proc.ExitCode -ne 0) { throw "ODT /configure ExitCode = $($proc.ExitCode)" }
+        }
     }
 
     if (-not $installOk) {
-        Add-Failure -StepLabel $label -Reason "Installation Microsoft 365 en échec."
+        Add-Failure -StepLabel $label -Reason "Installation Microsoft 365 en échec ou hors délai."
     }
 }
 

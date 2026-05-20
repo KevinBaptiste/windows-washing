@@ -71,7 +71,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 $Script:TempDir         = $env:TEMP
 $Script:DesktopPath     = [Environment]::GetFolderPath('Desktop')
 $Script:LogPath         = Join-Path $Script:DesktopPath ("PrepW11_Rapport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-$Script:Win11DebloatUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/main/Win11Debloat.ps1'
+$Script:Win11DebloatUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/refs/heads/master/Win11Debloat.ps1'
  
 #endregion ===========================================================================
  
