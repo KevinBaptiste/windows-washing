@@ -326,47 +326,48 @@ function Invoke-DebloatStep {
  
     $debloatPath = Join-Path $Script:TempDir 'Win11Debloat.ps1'
  
-## Téléchargement de l'archive complète du repo (le script seul ne suffit pas :
-# il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui).
-$repoZipUrl  = 'https://github.com/Raphire/Win11Debloat/archive/refs/heads/master.zip'
-$zipPath     = Join-Path $Script:TempDir 'Win11Debloat.zip'
-$extractDir  = Join-Path $Script:TempDir 'Win11Debloat-master'
-$debloatPath = Join-Path $extractDir 'Win11Debloat.ps1'
+    # Téléchargement de l'archive complète du repo (le script seul ne suffit pas :
+    # il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui).
+    $repoZipUrl  = 'https://github.com/Raphire/Win11Debloat/archive/refs/heads/master.zip'
+    $zipPath     = Join-Path $Script:TempDir 'Win11Debloat.zip'
+    $extractDir  = Join-Path $Script:TempDir 'Win11Debloat-master'
+    $debloatPath = Join-Path $extractDir 'Win11Debloat.ps1'
 
-# Nettoyage préalable (idempotence).
-if (Test-Path -LiteralPath $extractDir) {
-    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-}
-if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
-}
-
-# Téléchargement + extraction avec retry.
-$downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
-    Invoke-WebRequest -Uri $repoZipUrl -OutFile $zipPath -UseBasicParsing
-    if (-not (Test-Path -LiteralPath $zipPath)) { throw "ZIP non écrit." }
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $Script:TempDir -Force
-    if (-not (Test-Path -LiteralPath $debloatPath)) {
-        throw "Win11Debloat.ps1 introuvable après extraction."
+    # Nettoyage préalable (idempotence).
+    if (Test-Path -LiteralPath $extractDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
     }
-}
-
-if (-not $downloadOk) {
-    Add-Failure -StepLabel $label -Reason "Téléchargement Win11Debloat impossible."
-    return
-}
-
-# Exécution silencieuse depuis le dossier extrait (dépendances trouvées via $PSScriptRoot).
-$runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
-    $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing 2>&1 | Out-String
-    if (-not [string]::IsNullOrWhiteSpace($output)) {
-        $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
-        Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
+    if (Test-Path -LiteralPath $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     }
-}
 
-if (-not $runOk) {
-    Add-Failure -StepLabel $label -Reason "Exécution Win11Debloat en échec."
+    # Téléchargement + extraction avec retry.
+    $downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
+        Invoke-WebRequest -Uri $repoZipUrl -OutFile $zipPath -UseBasicParsing
+        if (-not (Test-Path -LiteralPath $zipPath)) { throw "ZIP non écrit." }
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $Script:TempDir -Force
+        if (-not (Test-Path -LiteralPath $debloatPath)) {
+            throw "Win11Debloat.ps1 introuvable après extraction."
+        }
+    }
+
+    if (-not $downloadOk) {
+        Add-Failure -StepLabel $label -Reason "Téléchargement Win11Debloat impossible."
+        return
+    }
+
+    # Exécution silencieuse depuis le dossier extrait (dépendances trouvées via $PSScriptRoot).
+    $runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
+        $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing 2>&1 | Out-String
+        if (-not [string]::IsNullOrWhiteSpace($output)) {
+            $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
+            Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
+        }
+    }
+
+    if (-not $runOk) {
+        Add-Failure -StepLabel $label -Reason "Exécution Win11Debloat en échec."
+    }
 }
  
 function Get-AntivirusStatus {
