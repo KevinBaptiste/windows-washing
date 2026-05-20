@@ -206,12 +206,12 @@ function Watch-OfficeInstallProgress {
     .PARAMETER Process
         Objet System.Diagnostics.Process renvoyé par Start-Process -PassThru.
     .PARAMETER PollSeconds
-        Intervalle entre deux mesures (défaut : 5s).
+        Intervalle entre deux mesures (défaut : 1s).
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
-        [int] $PollSeconds = 5
+        [int] $PollSeconds = 1
     )
 
     # Dossier cible créé par ODT. On surveille les deux emplacements possibles.
