@@ -1,4 +1,5 @@
-﻿# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
+﻿#irm https://raw.githubusercontent.com/KevinBaptiste/windows-washing/refs/heads/main/washing-claude.ps1 -OutFile $HOME\Desktop\washing.ps1 | powershell -ExecutionPolicy Bypass -File $HOME\Desktop\washing.ps1
+# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
 <#
 .SYNOPSIS
     Script de préparation automatisée d'un poste Windows 11 (exécution monobloc PowerShell 5.1).
@@ -530,17 +531,24 @@ function Install-Microsoft365 {
     # 2.d Génération du XML de configuration.
     $configPath = Join-Path $Script:TempDir 'configuration-install.xml'
     $xmlContent = @'
-<Configuration>
+<Configuration ID="aad1838d-35dd-4fd0-bae3-f6012e2b4113">
+  <Info Description="" />
   <Add OfficeClientEdition="64" Channel="Current">
-    <Product ID="O365HomePremRetail">
+    <Product ID="O365ProPlusRetail">
       <Language ID="fr-fr" />
+      <ExcludeApp ID="Access" />
       <ExcludeApp ID="Groove" />
       <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="Publisher" />
+    </Product>
+    <Product ID="ProofingTools">
+      <Language ID="en-gb" />
+      <Language ID="en-us" />
     </Product>
   </Add>
-  <Display Level="None" AcceptEULA="TRUE" />
-  <Property Name="AUTOACTIVATE" Value="0" />
+  <Updates Enabled="TRUE" />
   <RemoveMSI />
+  <Display Level="Full" AcceptEULA="TRUE" />
 </Configuration>
 '@
     Set-Content -LiteralPath $configPath -Value $xmlContent -Encoding UTF8
