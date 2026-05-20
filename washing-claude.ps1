@@ -468,7 +468,7 @@ function Install-GoogleChrome {
         Add-Failure -StepLabel $label -Reason "Installation Google Chrome en échec."
     }
 }
-<
+
 function Install-Microsoft365 {
     <#
     .SYNOPSIS
@@ -639,9 +639,9 @@ Write-LogEntry -Message "Session administrateur confirmée." -Level INFO
 Initialize-Winget
 Install-PowerShell7
 Invoke-DebloatStep
-Install-Microsoft365
 Get-AntivirusStatus
 Install-GoogleChrome
+Install-Microsoft365
 Clear-TempArtifacts
  
 Write-LogEntry -Message "=== Fin du traitement ===" -Level INFO
