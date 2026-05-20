@@ -1,18 +1,17 @@
-# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
+﻿# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
 <#
 .SYNOPSIS
-    Script de préparation automatisée d'un poste Windows 11.
+    Script de préparation automatisée d'un poste Windows 11 (exécution monobloc PowerShell 5.1).
  
 .DESCRIPTION
-    Script "Plug & Play" auto-extractible exécutant en chaîne :
+    Script "Plug & Play" lancé via clic-droit → "Exécuter avec PowerShell" :
       - Élévation administrateur automatique
-      - Installation de PowerShell 7 via Winget
-      - Bascule du traitement vers PS7
+      - Installation de PowerShell 7 via Winget (conservée mais non utilisée pour la suite)
       - Debloat Windows 11 (Win11Debloat / Raphire)
       - Installation Microsoft 365 Famille FR via ODT
       - Audit de l'antivirus actif
       - Installation Google Chrome
-      - Nettoyage et auto-destruction des fichiers temporaires
+      - Nettoyage des fichiers temporaires
     Aucune interaction utilisateur n'est requise. Un rapport est généré sur le Bureau.
  
 .EXAMPLE
@@ -20,17 +19,17 @@
  
 .NOTES
     Auteur  : Kevin (BTST)
-    Version : 1.0.0
+    Version : 1.1.0
     Date    : 2026-05-20
-    Cible   : Windows 11 22H2+, PowerShell 5.1 minimum
+    Cible   : Windows 11 22H2+, PowerShell 5.1
 #>
  
-#region ============================== BOOTSTRAP (PS 5.1) ==============================
+#region ============================== BOOTSTRAP ====================================
  
 # Politique d'erreur globale : toute exception non gérée stoppe l'étape courante.
 $ErrorActionPreference = 'Stop'
  
-# Forçage TLS 1.2 (nécessaire pour Invoke-WebRequest sous PS 5.1 sur certaines pages GitHub).
+# Forçage TLS 1.2 (nécessaire pour Invoke-WebRequest sous PS 5.1 sur GitHub).
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
  
 function Test-AdminContext {
@@ -69,92 +68,27 @@ if (-not (Test-AdminContext)) {
 Set-ExecutionPolicy Bypass -Scope Process -Force
  
 # Constantes globales (déclarées avant tout usage).
-$Script:TempDir          = $env:TEMP
-$Script:LogPath          = Join-Path ([Environment]::GetFolderPath('Desktop')) ("PrepW11_Rapport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-$Script:Win11DebloatUrl  = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/main/Win11Debloat.ps1'
-$Script:Pwsh7Path        = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
- 
-Write-Host "[BOOTSTRAP] Session administrateur confirmée." -ForegroundColor Yellow
-Write-Host "[BOOTSTRAP] Mise à jour des sources Winget..." -ForegroundColor Yellow
- 
-# Mise à jour des sources Winget (non bloquant en cas d'échec partiel).
-try {
-    winget source update --accept-source-agreements | Out-Null
-    Write-Host "[BOOTSTRAP] Sources Winget mises à jour." -ForegroundColor Green
-}
-catch {
-    Write-Host "[BOOTSTRAP] Avertissement : mise à jour des sources Winget en échec ($($_.Exception.Message))." -ForegroundColor Red
-}
- 
-# Installation de PowerShell 7 (idempotent : Winget skip si déjà installé).
-Write-Host "[BOOTSTRAP] Installation de PowerShell 7..." -ForegroundColor Yellow
-try {
-    $wingetArgs = @(
-        'install', '--id', 'Microsoft.PowerShell',
-        '--silent', '--accept-source-agreements', '--accept-package-agreements',
-        '--scope', 'machine'
-    )
-    & winget @wingetArgs | Out-Null
-    Write-Host "[BOOTSTRAP] PowerShell 7 installé (ou déjà présent)." -ForegroundColor Green
-}
-catch {
-    Write-Host "[BOOTSTRAP] Échec installation PS7 : $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
- 
-# Vérification de la présence physique de pwsh.exe (chemin absolu, jamais via PATH).
-if (-not (Test-Path -LiteralPath $Script:Pwsh7Path)) {
-    Write-Host "[BOOTSTRAP] pwsh.exe introuvable à l'emplacement attendu : $Script:Pwsh7Path" -ForegroundColor Red
-    exit 1
-}
+$Script:TempDir         = $env:TEMP
+$Script:DesktopPath     = [Environment]::GetFolderPath('Desktop')
+$Script:LogPath         = Join-Path $Script:DesktopPath ("PrepW11_Rapport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+$Script:Win11DebloatUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/main/Win11Debloat.ps1'
  
 #endregion ===========================================================================
- 
-#region ========================== PASSAGE DE RELAIS PS7 =============================
- 
-# Génération du script PS7 dans $env:TEMP via here-string.
-# Les variables marquées $Script: sont passées en arguments pour rester portables.
- 
-$ps7ScriptPath = Join-Path $Script:TempDir ("PrepW11_PS7_{0}.ps1" -f ([Guid]::NewGuid().ToString('N').Substring(0, 8)))
- 
-$ps7Body = @'
-<#
-.SYNOPSIS
-    Corps principal exécuté sous PowerShell 7.
-.DESCRIPTION
-    Réalise les étapes 1 à 5 du cahier des charges : Win11Debloat, Microsoft 365 FR,
-    audit antivirus, Google Chrome, nettoyage.
-.PARAMETER LogPath
-    Chemin complet du rapport texte sur le Bureau.
-.PARAMETER Win11DebloatUrl
-    URL brute du script Win11Debloat.ps1.
-.PARAMETER TempDir
-    Répertoire temporaire de travail.
-.NOTES
-    Auteur  : Kevin (BTST)
-    Version : 1.0.0
-#>
-[CmdletBinding()]
-param(
-    [Parameter(Mandatory)] [string] $LogPath,
-    [Parameter(Mandatory)] [string] $Win11DebloatUrl,
-    [Parameter(Mandatory)] [string] $TempDir,
-    [Parameter(Mandatory)] [string] $SelfPath
-)
- 
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
  
 #region ============================ LOGGING =========================================
  
 # Collection d'événements journalisés ; les échecs sont synthétisés en tête de rapport.
-$Script:LogEntries = [System.Collections.Generic.List[string]]::new()
-$Script:Failures   = [System.Collections.Generic.List[string]]::new()
+$Script:LogEntries = New-Object System.Collections.Generic.List[string]
+$Script:Failures   = New-Object System.Collections.Generic.List[string]
  
 function Write-LogEntry {
     <#
     .SYNOPSIS
-        Écrit une entrée journalisée à la fois en console (colorée) et en mémoire (rapport).
+        Écrit une entrée journalisée en console (colorée) et en mémoire (rapport).
+    .PARAMETER Message
+        Texte à journaliser.
+    .PARAMETER Level
+        Niveau de gravité : INFO, SUCCESS, ERROR ou WARN.
     #>
     [CmdletBinding()]
     param(
@@ -198,6 +132,10 @@ function Invoke-WithRetry {
     <#
     .SYNOPSIS
         Exécute un scriptblock avec retry automatique (3 tentatives, pause 5s).
+    .PARAMETER Action
+        Le bloc de code à exécuter.
+    .PARAMETER Label
+        Libellé descriptif pour le journal.
     .OUTPUTS
         [bool] $true si succès, $false si échec après 3 tentatives.
     #>
@@ -232,7 +170,9 @@ function Invoke-WithRetry {
 function Find-OdtSetup {
     <#
     .SYNOPSIS
-        Localise setup.exe de l'Office Deployment Tool dans Program Files.
+        Localise setup.exe de l'Office Deployment Tool.
+    .OUTPUTS
+        [string] Chemin complet de setup.exe, ou $null si introuvable.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -259,6 +199,58 @@ function Find-OdtSetup {
  
 #region ============================ STEPS ===========================================
  
+function Initialize-Winget {
+    <#
+    .SYNOPSIS
+        Étape 0a — Mise à jour des sources Winget.
+    #>
+    [CmdletBinding()]
+    param()
+ 
+    $label = "Étape 0 — Init Winget"
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+ 
+    $ok = Invoke-WithRetry -Label $label -Action {
+        winget source update --accept-source-agreements | Out-Null
+    }
+ 
+    if (-not $ok) {
+        Add-Failure -StepLabel $label -Reason "Mise à jour des sources Winget impossible."
+    }
+}
+ 
+function Install-PowerShell7 {
+    <#
+    .SYNOPSIS
+        Étape 0b — Installation de PowerShell 7 via Winget.
+    .DESCRIPTION
+        Installation conservée pour disposer de pwsh.exe sur le poste, mais la suite
+        du script continue de s'exécuter sous PowerShell 5.1.
+    #>
+    [CmdletBinding()]
+    param()
+ 
+    $label = "Étape 0 — PowerShell 7"
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+ 
+    $ok = Invoke-WithRetry -Label $label -Action {
+        $wingetArgs = @(
+            'install', '--id', 'Microsoft.PowerShell',
+            '--silent', '--accept-source-agreements', '--accept-package-agreements',
+            '--scope', 'machine'
+        )
+        & winget @wingetArgs | Out-Null
+        # Winget renvoie 0 (installé) ou -1978335189 (déjà installé) : on tolère.
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            throw "Winget PowerShell ExitCode = $LASTEXITCODE"
+        }
+    }
+ 
+    if (-not $ok) {
+        Add-Failure -StepLabel $label -Reason "Installation PowerShell 7 en échec."
+    }
+}
+ 
 function Invoke-DebloatStep {
     <#
     .SYNOPSIS
@@ -267,14 +259,14 @@ function Invoke-DebloatStep {
     [CmdletBinding()]
     param()
  
-    $label  = "Étape 1 — Win11Debloat"
+    $label = "Étape 1 — Win11Debloat"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
  
-    $debloatPath = Join-Path $TempDir 'Win11Debloat.ps1'
+    $debloatPath = Join-Path $Script:TempDir 'Win11Debloat.ps1'
  
     # Téléchargement avec retry.
     $downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
-        Invoke-WebRequest -Uri $Win11DebloatUrl -OutFile $debloatPath -UseBasicParsing
+        Invoke-WebRequest -Uri $Script:Win11DebloatUrl -OutFile $debloatPath -UseBasicParsing
         if (-not (Test-Path -LiteralPath $debloatPath)) { throw "Fichier non écrit." }
     }
  
@@ -286,7 +278,10 @@ function Invoke-DebloatStep {
     # Exécution silencieuse avec capture du flux.
     $runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
         $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing 2>&1 | Out-String
-        Write-LogEntry -Message "Win11Debloat stdout (extrait) : $($output.Substring(0, [Math]::Min(500, $output.Length)))" -Level INFO
+        if (-not [string]::IsNullOrWhiteSpace($output)) {
+            $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
+            Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
+        }
     }
  
     if (-not $runOk) {
@@ -308,13 +303,13 @@ function Install-Microsoft365 {
     $label = "Étape 2 — Microsoft 365 Famille FR"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
  
-    # 2.a Désinstallation des installations Office existantes (best-effort).
+    # 2.a Désinstallation des installations Office existantes (best-effort, non bloquant).
     $c2rExe = Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
     if (-not (Test-Path -LiteralPath $c2rExe)) {
         $c2rExe = Join-Path $env:ProgramFiles 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
     }
     if (Test-Path -LiteralPath $c2rExe) {
-        Write-LogEntry -Message "$label : désinstallation des Office existants via OfficeClickToRun." -Level INFO
+        Write-LogEntry -Message "$label : désinstallation Office via OfficeClickToRun." -Level INFO
         try {
             $proc = Start-Process -FilePath $c2rExe `
                                   -ArgumentList 'scenario=install', 'scenariosubtype=ARP', 'sourcetype=None', 'productstoremove=AllProducts', 'culture=fr-fr', 'DisplayLevel=False' `
@@ -326,15 +321,17 @@ function Install-Microsoft365 {
         }
     }
     else {
-        Write-LogEntry -Message "$label : aucun OfficeClickToRun détecté, pas d'Office à désinstaller." -Level INFO
+        Write-LogEntry -Message "$label : aucun OfficeClickToRun détecté, rien à désinstaller." -Level INFO
     }
  
     # 2.b Installation de l'Office Deployment Tool.
     $odtOk = Invoke-WithRetry -Label "$label (ODT install)" -Action {
-        $args = @('install', '--id', 'Microsoft.OfficeDeploymentTool',
-                  '--silent', '--accept-source-agreements', '--accept-package-agreements')
-        & winget @args | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Winget ODT ExitCode = $LASTEXITCODE" }
+        $odtArgs = @('install', '--id', 'Microsoft.OfficeDeploymentTool',
+                     '--silent', '--accept-source-agreements', '--accept-package-agreements')
+        & winget @odtArgs | Out-Null
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            throw "Winget ODT ExitCode = $LASTEXITCODE"
+        }
     }
  
     if (-not $odtOk) {
@@ -351,7 +348,7 @@ function Install-Microsoft365 {
     Write-LogEntry -Message "$label : ODT localisé à $setupPath" -Level INFO
  
     # 2.d Génération du XML de configuration.
-    $configPath = Join-Path $TempDir 'configuration-install.xml'
+    $configPath = Join-Path $Script:TempDir 'configuration-install.xml'
     $xmlContent = @'
 <Configuration>
   <Add OfficeClientEdition="64" Channel="Current">
@@ -401,7 +398,7 @@ function Get-AntivirusStatus {
         }
  
         foreach ($av in $products) {
-            # Décodage du bitmask productState (cf. Microsoft Learn).
+            # Décodage du bitmask productState (référence : Microsoft Learn).
             $stateHex   = '{0:X6}' -f $av.productState
             $enabledBit = [Convert]::ToInt32($stateHex.Substring(2, 2), 16)
             $sigBit     = [Convert]::ToInt32($stateHex.Substring(4, 2), 16)
@@ -430,10 +427,10 @@ function Install-GoogleChrome {
     Write-LogEntry -Message "$label : démarrage" -Level INFO
  
     $ok = Invoke-WithRetry -Label $label -Action {
-        $args = @('install', '--id', 'Google.Chrome',
-                  '--silent', '--accept-source-agreements', '--accept-package-agreements')
-        & winget @args | Out-Null
-        # Winget renvoie 0 si installé, -1978335189 si déjà présent (no upgrade) : on tolère.
+        $chromeArgs = @('install', '--id', 'Google.Chrome',
+                        '--silent', '--accept-source-agreements', '--accept-package-agreements')
+        & winget @chromeArgs | Out-Null
+        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
         if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
             throw "Winget Chrome ExitCode = $LASTEXITCODE"
         }
@@ -447,7 +444,7 @@ function Install-GoogleChrome {
 function Clear-TempArtifacts {
     <#
     .SYNOPSIS
-        Étape 5 — Nettoyage des résidus du script.
+        Étape 5 — Nettoyage des résidus du script dans $env:TEMP.
     #>
     [CmdletBinding()]
     param()
@@ -456,8 +453,8 @@ function Clear-TempArtifacts {
     Write-LogEntry -Message "$label : démarrage" -Level INFO
  
     $targets = @(
-        (Join-Path $TempDir 'Win11Debloat.ps1'),
-        (Join-Path $TempDir 'configuration-install.xml')
+        (Join-Path $Script:TempDir 'Win11Debloat.ps1'),
+        (Join-Path $Script:TempDir 'configuration-install.xml')
     )
     foreach ($t in $targets) {
         if (Test-Path -LiteralPath $t) {
@@ -472,82 +469,61 @@ function Clear-TempArtifacts {
     }
 }
  
+function Write-FinalReport {
+    <#
+    .SYNOPSIS
+        Génère le rapport final sur le Bureau avec synthèse des échecs en en-tête.
+    #>
+    [CmdletBinding()]
+    param()
+ 
+    # Construction en deux passes via StringBuilder : synthèse d'abord, journal ensuite.
+    $header = New-Object System.Text.StringBuilder
+    [void]$header.AppendLine('========================================')
+    [void]$header.AppendLine('RAPPORT D''EXÉCUTION — Préparation W11')
+    [void]$header.AppendLine("Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    [void]$header.AppendLine("Machine : $env:COMPUTERNAME")
+    [void]$header.AppendLine("Utilisateur : $env:USERNAME")
+    [void]$header.AppendLine('========================================')
+    [void]$header.AppendLine('')
+    [void]$header.AppendLine('>>> SYNTHÈSE DES ÉCHECS <<<')
+    if ($Script:Failures.Count -eq 0) {
+        [void]$header.AppendLine('Aucun échec détecté')
+    }
+    else {
+        foreach ($f in $Script:Failures) { [void]$header.AppendLine($f) }
+    }
+    [void]$header.AppendLine('')
+    [void]$header.AppendLine('========================================')
+    [void]$header.AppendLine('JOURNAL DÉTAILLÉ')
+    [void]$header.AppendLine('========================================')
+ 
+    $fullReport = $header.ToString() + ($Script:LogEntries -join [Environment]::NewLine)
+    Set-Content -LiteralPath $Script:LogPath -Value $fullReport -Encoding UTF8
+ 
+    Write-Host ""
+    Write-Host "Rapport écrit : $Script:LogPath" -ForegroundColor Green
+}
+ 
 #endregion ===========================================================================
  
 #region ============================ MAIN ============================================
  
-Write-LogEntry -Message "=== Début du traitement PS7 ===" -Level INFO
+Write-LogEntry -Message "=== Début du traitement (PowerShell 5.1) ===" -Level INFO
+Write-LogEntry -Message "Session administrateur confirmée." -Level INFO
  
+Initialize-Winget
+Install-PowerShell7
 Invoke-DebloatStep
 Install-Microsoft365
 Get-AntivirusStatus
 Install-GoogleChrome
 Clear-TempArtifacts
  
-Write-LogEntry -Message "=== Fin du traitement PS7 ===" -Level INFO
+Write-LogEntry -Message "=== Fin du traitement ===" -Level INFO
  
-# --- Écriture du rapport final en deux passes ---
-$header = [System.Text.StringBuilder]::new()
-[void]$header.AppendLine('========================================')
-[void]$header.AppendLine('RAPPORT D''EXÉCUTION — Préparation W11')
-[void]$header.AppendLine("Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-[void]$header.AppendLine("Machine : $env:COMPUTERNAME")
-[void]$header.AppendLine("Utilisateur : $env:USERNAME")
-[void]$header.AppendLine('========================================')
-[void]$header.AppendLine('')
-[void]$header.AppendLine('>>> SYNTHÈSE DES ÉCHECS <<<')
-if ($Script:Failures.Count -eq 0) {
-    [void]$header.AppendLine('Aucun échec détecté')
-}
-else {
-    foreach ($f in $Script:Failures) { [void]$header.AppendLine($f) }
-}
-[void]$header.AppendLine('')
-[void]$header.AppendLine('========================================')
-[void]$header.AppendLine('JOURNAL DÉTAILLÉ')
-[void]$header.AppendLine('========================================')
- 
-$fullReport = $header.ToString() + ($Script:LogEntries -join [Environment]::NewLine)
-Set-Content -LiteralPath $LogPath -Value $fullReport -Encoding UTF8
- 
-Write-Host ""
-Write-Host "Rapport écrit : $LogPath" -ForegroundColor Green
- 
-# --- Auto-suppression différée du script PS7 lui-même (détaché) ---
-$selfDelete = "timeout /t 5 /nobreak >nul & del /f /q `"$SelfPath`""
-Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $selfDelete -WindowStyle Hidden
- 
-#endregion ===========================================================================
-'@
- 
-# Écriture du script PS7 en UTF-8 avec BOM (accents PS7 OK, prudence accrue).
-$utf8Bom = New-Object System.Text.UTF8Encoding $true
-[System.IO.File]::WriteAllText($ps7ScriptPath, $ps7Body, $utf8Bom)
- 
-Write-Host "[BOOTSTRAP] Script PS7 écrit : $ps7ScriptPath" -ForegroundColor Gray
-Write-Host "[BOOTSTRAP] Lancement de PowerShell 7..." -ForegroundColor Yellow
- 
-# Lancement de PS7 via chemin absolu, en synchrone, sans profil ni interaction.
-$pwshArgs = @(
-    '-NoProfile', '-NonInteractive',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', $ps7ScriptPath,
-    '-LogPath',         $Script:LogPath,
-    '-Win11DebloatUrl', $Script:Win11DebloatUrl,
-    '-TempDir',         $Script:TempDir,
-    '-SelfPath',        $ps7ScriptPath
-)
- 
-try {
-    $ps7Proc = Start-Process -FilePath $Script:Pwsh7Path -ArgumentList $pwshArgs -Wait -PassThru -NoNewWindow
-    Write-Host "[BOOTSTRAP] PS7 terminé avec ExitCode = $($ps7Proc.ExitCode)" -ForegroundColor Green
-}
-catch {
-    Write-Host "[BOOTSTRAP] Échec du lancement PS7 : $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
+Write-FinalReport
  
 #endregion ===========================================================================
  
-# Fermeture propre de la session PS 5.1.
 exit 0
