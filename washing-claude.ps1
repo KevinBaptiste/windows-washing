@@ -473,18 +473,18 @@ function Install-GoogleChrome {
 function Install-Microsoft365 {
     <#
     .SYNOPSIS
-        Étape 2 — Installation de Microsoft 365 Famille FR via ODT.
+        Étape 2 — Installation de Microsoft 365 Apps for Entreprise via ODT.
     .DESCRIPTION
         Désinstallation des Office existants via OfficeClickToRun, puis installation
-        de M365 Famille FR avec un fichier configuration-install.xml généré en mémoire.
+        de Microsoft 365 Apps for Entreprise avec un fichier configuration-install.xml généré en mémoire.
     #>
     [CmdletBinding()]
     param()
  
-    $label = "Étape 2 — Microsoft 365 Famille FR"
+    $label = "Étape 2 — Microsoft 365 Apps for Entreprise"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
  
-    # 2.a Désinstallation des installations Office existantes (best-effort, non bloquant).
+# 2.a Désinstallation des installations Office existantes (best-effort, non bloquant).
     $c2rExe = Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
     if (-not (Test-Path -LiteralPath $c2rExe)) {
         $c2rExe = Join-Path $env:ProgramFiles 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
@@ -503,6 +503,49 @@ function Install-Microsoft365 {
     }
     else {
         Write-LogEntry -Message "$label : aucun OfficeClickToRun détecté, rien à désinstaller." -Level INFO
+    }
+
+    # 2.a-bis Désinstallation des paquets AppX/MSIX correspondant aux 12 apps cibles.
+    # (Access, Excel, OneDrive Groove, Skype for Business, OneDrive Desktop, OneNote,
+    #  Outlook classic, Outlook new, PowerPoint, Publisher, Teams, Word).
+    $appxPatterns = @(
+        '*Microsoft.Office.Desktop*',          # Access, Excel, Word, PowerPoint, Outlook classic, Publisher
+        '*Microsoft.Office.OneNote*',          # OneNote
+        '*Microsoft.OneNote*',                 # OneNote variantes
+        '*Microsoft.OneDriveSync*',            # OneDrive Groove
+        '*Microsoft.SkypeForBusiness*',        # Skype for Business
+        '*Microsoft.Teams*',                   # Teams
+        '*MSTeams*',                           # Teams new
+        '*Microsoft.OutlookForWindows*',       # Outlook new
+        '*microsoft.windowscommunicationsapps*' # Outlook/Mail legacy
+    )
+    foreach ($pattern in $appxPatterns) {
+        try {
+            $packages = Get-AppxPackage -AllUsers -Name $pattern -ErrorAction SilentlyContinue
+            foreach ($pkg in $packages) {
+                try {
+                    Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction Stop
+                    Write-LogEntry -Message "$label : AppX supprimé — $($pkg.Name)" -Level SUCCESS
+                }
+                catch {
+                    Write-LogEntry -Message "$label : échec suppression AppX $($pkg.Name) — $($_.Exception.Message)" -Level WARN
+                }
+            }
+            $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+                            Where-Object { $_.DisplayName -like $pattern }
+            foreach ($prov in $provisioned) {
+                try {
+                    Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction Stop | Out-Null
+                    Write-LogEntry -Message "$label : AppX provisionné supprimé — $($prov.DisplayName)" -Level SUCCESS
+                }
+                catch {
+                    Write-LogEntry -Message "$label : échec suppression provisioning $($prov.DisplayName) — $($_.Exception.Message)" -Level WARN
+                }
+            }
+        }
+        catch {
+            Write-LogEntry -Message "$label : erreur pattern $pattern — $($_.Exception.Message)" -Level WARN
+        }
     }
  
     # 2.b Installation de l'Office Deployment Tool.
@@ -554,7 +597,7 @@ function Install-Microsoft365 {
     Set-Content -LiteralPath $configPath -Value $xmlContent -Encoding UTF8
  
 # 2.e Lancement de l'installation avec surveillance de la progression.
-    $installOk = Invoke-WithRetry -Label "$label (M365 install)" -Action {
+    $installOk = Invoke-WithRetry -Label "$label (M365 install)" -MaxAttempts 1 -Action {
         # -PassThru sans -Wait : on récupère le handle pour surveiller en parallèle.
         $proc = Start-Process -FilePath $setupPath `
                               -ArgumentList '/configure', "`"$configPath`"" `
@@ -562,7 +605,7 @@ function Install-Microsoft365 {
         if (-not $proc) { throw "Impossible de démarrer setup.exe." }
 
         # Boucle de surveillance (bloque jusqu'à la fin du process).
-        Watch-OfficeInstallProgress -Process $proc -EstimatedSizeMB 4000 -PollSeconds 5
+        Watch-OfficeInstallProgress -Process $proc -PollSeconds 1
 
         # Vérification finale du code de sortie.
         if ($proc.ExitCode -ne 0) { throw "ODT /configure ExitCode = $($proc.ExitCode)" }
