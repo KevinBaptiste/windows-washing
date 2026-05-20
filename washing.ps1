@@ -598,8 +598,22 @@ function Install-Microsoft365 {
         # Boucle de surveillance (bloque jusqu'à la fin du process).
         Watch-OfficeInstallProgress -Process $proc -PollSeconds 1
 
-        # Vérification finale du code de sortie.
-        if ($proc.ExitCode -ne 0) { throw "ODT /configure ExitCode = $($proc.ExitCode)" }
+        # ODT setup.exe délègue à OfficeClickToRun.exe puis se termine avec un ExitCode
+        # parfois non nul/null alors que l'installation réussit. On valide donc par la
+        # présence effective des binaires Office.
+        $exitCode = $proc.ExitCode
+        Write-LogEntry -Message "$label : ODT setup.exe ExitCode = $exitCode" -Level INFO
+
+        $officeMarkers = @(
+            (Join-Path $env:ProgramFiles 'Microsoft Office\root\Office16\WINWORD.EXE'),
+            (Join-Path $env:ProgramFiles 'Microsoft Office\root\Office16\EXCEL.EXE')
+        )
+        $installed = $officeMarkers | Where-Object { Test-Path -LiteralPath $_ }
+
+        if (-not $installed) {
+            throw "Office non détecté après installation (ExitCode ODT = $exitCode)."
+        }
+        Write-LogEntry -Message "$label : Office détecté sur disque ($($installed.Count) binaire(s))." -Level SUCCESS
     }
  
     if (-not $installOk) {
