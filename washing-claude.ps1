@@ -194,7 +194,69 @@ function Find-OdtSetup {
  
     return $null
 }
- 
+
+function Watch-OfficeInstallProgress {
+    <#
+    .SYNOPSIS
+        Surveille la progression de l'installation Office par mesure de la taille du dossier cible.
+    .DESCRIPTION
+        Tant que le process ODT tourne, la fonction mesure périodiquement la taille de
+        C:\Program Files\Microsoft Office et affiche une barre Write-Progress.
+        Taille finale estimée : 4 Go pour M365 Famille FR (Word, Excel, PowerPoint, Outlook,
+        OneNote, Publisher, Access) hors Groove/Lync exclus.
+    .PARAMETER Process
+        Objet System.Diagnostics.Process renvoyé par Start-Process -PassThru.
+    .PARAMETER EstimatedSizeMB
+        Taille finale estimée en Mo (défaut : 4000).
+    .PARAMETER PollSeconds
+        Intervalle entre deux mesures (défaut : 5s).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [int] $EstimatedSizeMB = 4000,
+        [int] $PollSeconds     = 5
+    )
+
+    # Dossier cible créé par ODT. On surveille les deux emplacements possibles.
+    $officePaths = @(
+        (Join-Path $env:ProgramFiles 'Microsoft Office'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office')
+    )
+
+    $startTime = Get-Date
+
+    while (-not $Process.HasExited) {
+        # Somme des tailles des deux emplacements (l'un des deux peut ne pas exister).
+        $totalBytes = 0
+        foreach ($p in $officePaths) {
+            if (Test-Path -LiteralPath $p) {
+                try {
+                    $totalBytes += (Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue |
+                                    Measure-Object -Property Length -Sum).Sum
+                }
+                catch {
+                    # Lecture concurrente possible pendant l'install : on ignore.
+                }
+            }
+        }
+
+        $currentMB = [math]::Round($totalBytes / 1MB, 0)
+        $percent   = [math]::Min(99, [math]::Round(($currentMB / $EstimatedSizeMB) * 100, 0))
+        $elapsed   = (Get-Date) - $startTime
+        $elapsedFmt = "{0:hh\:mm\:ss}" -f $elapsed
+
+        Write-Progress -Activity "Installation Microsoft 365 Famille FR" `
+                       -Status ("{0} Mo / ~{1} Mo  |  Écoulé : {2}" -f $currentMB, $EstimatedSizeMB, $elapsedFmt) `
+                       -PercentComplete $percent
+
+        Start-Sleep -Seconds $PollSeconds
+    }
+
+    # Fermeture propre de la barre.
+    Write-Progress -Activity "Installation Microsoft 365 Famille FR" -Completed
+}
+
 #endregion ===========================================================================
  
 #region ============================ STEPS ===========================================
@@ -365,11 +427,18 @@ function Install-Microsoft365 {
 '@
     Set-Content -LiteralPath $configPath -Value $xmlContent -Encoding UTF8
  
-    # 2.e Lancement de l'installation.
+# 2.e Lancement de l'installation avec surveillance de la progression.
     $installOk = Invoke-WithRetry -Label "$label (M365 install)" -Action {
+        # -PassThru sans -Wait : on récupère le handle pour surveiller en parallèle.
         $proc = Start-Process -FilePath $setupPath `
                               -ArgumentList '/configure', "`"$configPath`"" `
-                              -Wait -PassThru -NoNewWindow
+                              -PassThru -NoNewWindow
+        if (-not $proc) { throw "Impossible de démarrer setup.exe." }
+
+        # Boucle de surveillance (bloque jusqu'à la fin du process).
+        Watch-OfficeInstallProgress -Process $proc -EstimatedSizeMB 4000 -PollSeconds 5
+
+        # Vérification finale du code de sortie.
         if ($proc.ExitCode -ne 0) { throw "ODT /configure ExitCode = $($proc.ExitCode)" }
     }
  
