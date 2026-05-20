@@ -9,7 +9,7 @@
       - Élévation administrateur automatique
       - Installation de PowerShell 7 via Winget (conservée mais non utilisée pour la suite)
       - Debloat Windows 11 (Win11Debloat / Raphire)
-      - Installation Microsoft 365 Famille FR via ODT
+      - Installation Microsoft 365 Apps for Entreprise FR via ODT
       - Audit de l'antivirus actif
       - Installation Google Chrome
       - Nettoyage des fichiers temporaires
@@ -203,20 +203,17 @@ function Watch-OfficeInstallProgress {
     .DESCRIPTION
         Tant que le process ODT tourne, la fonction mesure périodiquement la taille de
         C:\Program Files\Microsoft Office et affiche une barre Write-Progress.
-        Taille finale estimée : 4 Go pour M365 Famille FR (Word, Excel, PowerPoint, Outlook,
+        Taille en cours Microsoft 365 Apps for Entreprise FR (Word, Excel, PowerPoint, Outlook,
         OneNote, Publisher, Access) hors Groove/Lync exclus.
     .PARAMETER Process
         Objet System.Diagnostics.Process renvoyé par Start-Process -PassThru.
-    .PARAMETER EstimatedSizeMB
-        Taille finale estimée en Mo (défaut : 4000).
     .PARAMETER PollSeconds
-        Intervalle entre deux mesures (défaut : 5s).
+        Intervalle entre deux mesures (défaut : 1s).
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
-        [int] $EstimatedSizeMB = 4000,
-        [int] $PollSeconds     = 5
+        [int] $PollSeconds     = 1
     )
 
     # Dossier cible créé par ODT. On surveille les deux emplacements possibles.
@@ -248,14 +245,14 @@ function Watch-OfficeInstallProgress {
         $elapsedFmt = "{0:hh\:mm\:ss}" -f $elapsed
 
         Write-Progress -Activity "Installation Microsoft 365 Famille FR" `
-                       -Status ("{0} Mo / ~{1} Mo  |  Écoulé : {2}" -f $currentMB, $EstimatedSizeMB, $elapsedFmt) `
+                       -Status ("{0} Mo / ~{1} Mo  |  Écoulé : {2}" -f $currentMB, $elapsedFmt) `
                        -PercentComplete $percent
 
         Start-Sleep -Seconds $PollSeconds
     }
 
     # Fermeture propre de la barre.
-    Write-Progress -Activity "Installation Microsoft 365 Famille FR" -Completed
+    Write-Progress -Activity "Installation Microsoft 365 Apps for Entreprise" -Completed
 }
 
 #endregion ===========================================================================
