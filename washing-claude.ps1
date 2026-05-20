@@ -286,15 +286,33 @@ function Install-PowerShell7 {
     .SYNOPSIS
         Étape 0b — Installation de PowerShell 7 via Winget.
     .DESCRIPTION
-        Installation conservée pour disposer de pwsh.exe sur le poste, mais la suite
+        Vérifie d'abord la présence de pwsh.exe (chemin standard d'installation machine).
+        Si déjà présent, l'installation est skippée. Sinon, installation silencieuse via Winget.
+        L'installation est conservée pour disposer de pwsh.exe sur le poste, mais la suite
         du script continue de s'exécuter sous PowerShell 5.1.
     #>
     [CmdletBinding()]
     param()
- 
+
     $label = "Étape 0 — PowerShell 7"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
+
+    # Vérification préalable : pwsh.exe présent au chemin standard d'installation machine ?
+    $pwshPath = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+    if (Test-Path -LiteralPath $pwshPath) {
+        try {
+            # Récupération de la version pour log informatif.
+            $versionOutput = & $pwshPath -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
+            Write-LogEntry -Message "$label : PowerShell $versionOutput déjà installé, installation skippée." -Level SUCCESS
+        }
+        catch {
+            Write-LogEntry -Message "$label : PowerShell 7 déjà installé (version non lisible), installation skippée." -Level SUCCESS
+        }
+        return
+    }
+
+    Write-LogEntry -Message "$label : PowerShell 7 absent, installation via Winget." -Level INFO
+
     $ok = Invoke-WithRetry -Label $label -Action {
         $wingetArgs = @(
             'install', '--id', 'Microsoft.PowerShell',
@@ -302,12 +320,13 @@ function Install-PowerShell7 {
             '--scope', 'machine'
         )
         & winget @wingetArgs | Out-Null
-        # Winget renvoie 0 (installé) ou -1978335189 (déjà installé) : on tolère.
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+        # Codes tolérés : 0 (OK), -1978335189 (déjà installé), -1978334957 (update interdit / déjà géré par MSIX).
+        $toleratedCodes = @(0, -1978335189, -1978334957)
+        if ($toleratedCodes -notcontains $LASTEXITCODE) {
             throw "Winget PowerShell ExitCode = $LASTEXITCODE"
         }
     }
- 
+
     if (-not $ok) {
         Add-Failure -StepLabel $label -Reason "Installation PowerShell 7 en échec."
     }
