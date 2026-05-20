@@ -1,4 +1,4 @@
-# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
+﻿# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
 <#
 .SYNOPSIS
     Script de préparation automatisée d'un poste Windows 11.
