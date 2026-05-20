@@ -326,68 +326,47 @@ function Invoke-DebloatStep {
  
     $debloatPath = Join-Path $Script:TempDir 'Win11Debloat.ps1'
  
-# Préparation du dossier Config et du fichier DefaultSettings.json sur le Bureau.
-# Le contenu est téléchargé directement depuis le repo Raphire/Win11Debloat pour
-# garantir l'alignement avec la version courante du projet.
-$configDir         = Join-Path $Script:DesktopPath 'Config'
-$configFile        = Join-Path $configDir 'DefaultSettings.json'
-$defaultSettingsUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/refs/heads/master/Config/DefaultSettings.json'
+## Téléchargement de l'archive complète du repo (le script seul ne suffit pas :
+# il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui).
+$repoZipUrl  = 'https://github.com/Raphire/Win11Debloat/archive/refs/heads/master.zip'
+$zipPath     = Join-Path $Script:TempDir 'Win11Debloat.zip'
+$extractDir  = Join-Path $Script:TempDir 'Win11Debloat-master'
+$debloatPath = Join-Path $extractDir 'Win11Debloat.ps1'
 
-    # Création du dossier Config sur le Bureau.
-try {
-    if (-not (Test-Path -LiteralPath $configDir)) {
-        New-Item -Path $configDir -ItemType Directory -Force | Out-Null
-        Write-LogEntry -Message "$label : dossier Config créé : $configDir" -Level SUCCESS
-    }
-    else {
-        Write-LogEntry -Message "$label : dossier Config déjà présent : $configDir" -Level INFO
-    }
+# Nettoyage préalable (idempotence).
+if (Test-Path -LiteralPath $extractDir) {
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-catch {
-    Write-LogEntry -Message "$label : création du dossier Config en échec — $($_.Exception.Message)" -Level WARN
+if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 }
 
-# Téléchargement du DefaultSettings.json avec retry (3 tentatives, pause 5s).
-$configDownloadOk = Invoke-WithRetry -Label "$label (config download)" -Action {
-    Invoke-WebRequest -Uri $defaultSettingsUrl -OutFile $configFile -UseBasicParsing
-    if (-not (Test-Path -LiteralPath $configFile)) { throw "Fichier DefaultSettings.json non écrit." }
-
-    # Validation : le fichier doit être un JSON parsable et contenir la clé Settings.
-    $parsed = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
-    if (-not $parsed.Settings) { throw "DefaultSettings.json invalide (clé Settings absente)." }
+# Téléchargement + extraction avec retry.
+$downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
+    Invoke-WebRequest -Uri $repoZipUrl -OutFile $zipPath -UseBasicParsing
+    if (-not (Test-Path -LiteralPath $zipPath)) { throw "ZIP non écrit." }
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $Script:TempDir -Force
+    if (-not (Test-Path -LiteralPath $debloatPath)) {
+        throw "Win11Debloat.ps1 introuvable après extraction."
+    }
 }
 
-if ($configDownloadOk) {
-    Write-LogEntry -Message "$label : DefaultSettings.json écrit : $configFile" -Level SUCCESS
-}
-else {
-    Write-LogEntry -Message "$label : DefaultSettings.json non récupéré, poursuite avec switches CLI par défaut." -Level WARN
-    # Non bloquant : Win11Debloat fonctionnera avec les paramètres -Silent -RemoveApps...
+if (-not $downloadOk) {
+    Add-Failure -StepLabel $label -Reason "Téléchargement Win11Debloat impossible."
+    return
 }
 
-    # Téléchargement avec retry.
-    $downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
-        Invoke-WebRequest -Uri $Script:Win11DebloatUrl -OutFile $debloatPath -UseBasicParsing
-        if (-not (Test-Path -LiteralPath $debloatPath)) { throw "Fichier non écrit." }
+# Exécution silencieuse depuis le dossier extrait (dépendances trouvées via $PSScriptRoot).
+$runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
+    $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing 2>&1 | Out-String
+    if (-not [string]::IsNullOrWhiteSpace($output)) {
+        $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
+        Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
     }
- 
-    if (-not $downloadOk) {
-        Add-Failure -StepLabel $label -Reason "Téléchargement Win11Debloat impossible."
-        return
-    }
- 
-    # Exécution silencieuse avec capture du flux.
-    $runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
-        $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing 2>&1 | Out-String
-        if (-not [string]::IsNullOrWhiteSpace($output)) {
-            $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
-            Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
-        }
-    }
- 
-    if (-not $runOk) {
-        Add-Failure -StepLabel $label -Reason "Exécution Win11Debloat en échec."
-    }
+}
+
+if (-not $runOk) {
+    Add-Failure -StepLabel $label -Reason "Exécution Win11Debloat en échec."
 }
  
 function Get-AntivirusStatus {
