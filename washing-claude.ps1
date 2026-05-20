@@ -351,6 +351,69 @@ function Invoke-DebloatStep {
     }
 }
  
+function Get-AntivirusStatus {
+    <#
+    .SYNOPSIS
+        Étape 3 — Audit des antivirus déclarés au Security Center.
+    #>
+    [CmdletBinding()]
+    param()
+ 
+    $label = "Étape 3 — Audit Antivirus"
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+ 
+    try {
+        $products = Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct' -ErrorAction Stop
+ 
+        if (-not $products) {
+            Write-LogEntry -Message "$label : aucun antivirus déclaré." -Level WARN
+            return
+        }
+ 
+        foreach ($av in $products) {
+            # Décodage du bitmask productState (référence : Microsoft Learn).
+            $stateHex   = '{0:X6}' -f $av.productState
+            $enabledBit = [Convert]::ToInt32($stateHex.Substring(2, 2), 16)
+            $sigBit     = [Convert]::ToInt32($stateHex.Substring(4, 2), 16)
+ 
+            $enabled = if ($enabledBit -band 0x10) { 'Enabled' } else { 'Disabled' }
+            $sigs    = if ($sigBit -eq 0x00)        { 'UpToDate' } else { 'Outdated' }
+ 
+            Write-LogEntry -Message ("$label : {0} | État : {1} | Signatures : {2}" -f $av.displayName, $enabled, $sigs) -Level SUCCESS
+        }
+    }
+    catch {
+        Add-Failure -StepLabel $label -Reason "Lecture SecurityCenter2 impossible : $($_.Exception.Message)"
+        Write-LogEntry -Message "$label : échec — $($_.Exception.Message)" -Level ERROR
+    }
+}
+ 
+function Install-GoogleChrome {
+    <#
+    .SYNOPSIS
+        Étape 4 — Installation silencieuse de Google Chrome via Winget.
+    #>
+    [CmdletBinding()]
+    param()
+ 
+    $label = "Étape 4 — Google Chrome"
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+ 
+    $ok = Invoke-WithRetry -Label $label -Action {
+        $chromeArgs = @('install', '--id', 'Google.Chrome',
+                        '--silent', '--accept-source-agreements', '--accept-package-agreements')
+        & winget @chromeArgs | Out-Null
+        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            throw "Winget Chrome ExitCode = $LASTEXITCODE"
+        }
+    }
+ 
+    if (-not $ok) {
+        Add-Failure -StepLabel $label -Reason "Installation Google Chrome en échec."
+    }
+}
+
 function Install-Microsoft365 {
     <#
     .SYNOPSIS
@@ -444,69 +507,6 @@ function Install-Microsoft365 {
  
     if (-not $installOk) {
         Add-Failure -StepLabel $label -Reason "Installation Microsoft 365 en échec."
-    }
-}
- 
-function Get-AntivirusStatus {
-    <#
-    .SYNOPSIS
-        Étape 3 — Audit des antivirus déclarés au Security Center.
-    #>
-    [CmdletBinding()]
-    param()
- 
-    $label = "Étape 3 — Audit Antivirus"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
-    try {
-        $products = Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName 'AntiVirusProduct' -ErrorAction Stop
- 
-        if (-not $products) {
-            Write-LogEntry -Message "$label : aucun antivirus déclaré." -Level WARN
-            return
-        }
- 
-        foreach ($av in $products) {
-            # Décodage du bitmask productState (référence : Microsoft Learn).
-            $stateHex   = '{0:X6}' -f $av.productState
-            $enabledBit = [Convert]::ToInt32($stateHex.Substring(2, 2), 16)
-            $sigBit     = [Convert]::ToInt32($stateHex.Substring(4, 2), 16)
- 
-            $enabled = if ($enabledBit -band 0x10) { 'Enabled' } else { 'Disabled' }
-            $sigs    = if ($sigBit -eq 0x00)        { 'UpToDate' } else { 'Outdated' }
- 
-            Write-LogEntry -Message ("$label : {0} | État : {1} | Signatures : {2}" -f $av.displayName, $enabled, $sigs) -Level SUCCESS
-        }
-    }
-    catch {
-        Add-Failure -StepLabel $label -Reason "Lecture SecurityCenter2 impossible : $($_.Exception.Message)"
-        Write-LogEntry -Message "$label : échec — $($_.Exception.Message)" -Level ERROR
-    }
-}
- 
-function Install-GoogleChrome {
-    <#
-    .SYNOPSIS
-        Étape 4 — Installation silencieuse de Google Chrome via Winget.
-    #>
-    [CmdletBinding()]
-    param()
- 
-    $label = "Étape 4 — Google Chrome"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
-    $ok = Invoke-WithRetry -Label $label -Action {
-        $chromeArgs = @('install', '--id', 'Google.Chrome',
-                        '--silent', '--accept-source-agreements', '--accept-package-agreements')
-        & winget @chromeArgs | Out-Null
-        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-            throw "Winget Chrome ExitCode = $LASTEXITCODE"
-        }
-    }
- 
-    if (-not $ok) {
-        Add-Failure -StepLabel $label -Reason "Installation Google Chrome en échec."
     }
 }
  
