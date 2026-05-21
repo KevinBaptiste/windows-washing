@@ -611,7 +611,107 @@ function Install-Microsoft365 {
         Add-Failure -StepLabel $label -Reason "Installation Microsoft 365 en échec."
     }
 }
- 
+
+function Install-VLC {
+    <#
+    .SYNOPSIS
+        Étape 6 — Installation silencieuse de VLC via Winget.
+    .DESCRIPTION
+        Vérifie d'abord la présence de vlc.exe (chemins standard d'installation machine).
+        Si déjà présent, l'installation est skippée. Sinon, installation silencieuse
+        de la dernière version via Winget.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $label = "Étape 6 — VLC"
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+
+    # Vérification préalable : vlc.exe présent à un des chemins standard ?
+    $vlcCandidates = @(
+        (Join-Path $env:ProgramFiles 'VideoLAN\VLC\vlc.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'VideoLAN\VLC\vlc.exe')
+    )
+    $vlcPath = $vlcCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($vlcPath) {
+        try {
+            $versionOutput = (Get-Item -LiteralPath $vlcPath).VersionInfo.ProductVersion
+            Write-LogEntry -Message "$label : VLC $versionOutput déjà installé, installation skippée." -Level SUCCESS
+        }
+        catch {
+            Write-LogEntry -Message "$label : VLC déjà installé (version non lisible), installation skippée." -Level SUCCESS
+        }
+        return
+    }
+
+    Write-LogEntry -Message "$label : VLC absent, installation via Winget." -Level INFO
+
+    $ok = Invoke-WithRetry -Label $label -Action {
+        $vlcArgs = @('install', '--id', 'VideoLAN.VLC',
+                     '--silent', '--accept-source-agreements', '--accept-package-agreements')
+        & winget @vlcArgs | Out-Null
+        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            throw "Winget VLC ExitCode = $LASTEXITCODE"
+        }
+    }
+
+    if (-not $ok) {
+        Add-Failure -StepLabel $label -Reason "Installation VLC en échec."
+    }
+}
+
+function Install-FoxitReader {
+    <#
+    .SYNOPSIS
+        Étape 8 — Installation silencieuse de Foxit PDF Reader via Winget.
+    .DESCRIPTION
+        Vérifie d'abord la présence de FoxitPDFReader.exe (chemins standard).
+        Si déjà présent, l'installation est skippée. Sinon, installation silencieuse
+        de la dernière version via Winget.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $label = "Étape 8 — Foxit PDF Reader"
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+
+    # Vérification préalable : binaire Foxit présent ?
+    $foxitCandidates = @(
+        (Join-Path $env:ProgramFiles        'Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
+        (Join-Path $env:ProgramFiles        'Foxit Software\Foxit Reader\FoxitReader.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Foxit Software\Foxit Reader\FoxitReader.exe')
+    )
+    $foxitPath = $foxitCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($foxitPath) {
+        try {
+            $versionOutput = (Get-Item -LiteralPath $foxitPath).VersionInfo.ProductVersion
+            Write-LogEntry -Message "$label : Foxit Reader $versionOutput déjà installé, installation skippée." -Level SUCCESS
+        }
+        catch {
+            Write-LogEntry -Message "$label : Foxit Reader déjà installé (version non lisible), installation skippée." -Level SUCCESS
+        }
+        return
+    }
+
+    Write-LogEntry -Message "$label : Foxit Reader absent, installation via Winget." -Level INFO
+
+    $ok = Invoke-WithRetry -Label $label -Action {
+        $foxitArgs = @('install', '--id', 'Foxit.FoxitReader',
+                       '--silent', '--accept-source-agreements', '--accept-package-agreements')
+        & winget @foxitArgs | Out-Null
+        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            throw "Winget Foxit Reader ExitCode = $LASTEXITCODE"
+        }
+    }
+
+    if (-not $ok) {
+        Add-Failure -StepLabel $label -Reason "Installation Foxit Reader en échec."
+    }
+}
+
 function Clear-TempArtifacts {
     <#
     .SYNOPSIS
@@ -687,6 +787,8 @@ Initialize-Winget
 Install-PowerShell7
 Invoke-DebloatStep
 Get-AntivirusStatus
+Install-VLC
+Install-FoxitReader
 Install-GoogleChrome
 Install-Microsoft365
 Clear-TempArtifacts
