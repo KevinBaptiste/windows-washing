@@ -36,14 +36,11 @@ La préparation d'un poste neuf prend habituellement 30 à 60 minutes de clics m
 
 - ✅ **Élévation administrateur automatique** via RunAs
 - ✅ **Installation de PowerShell 7** (avec détection préalable pour éviter les réinstallations)
-- ✅ **Debloat Windows 11** via [Raphire/Win11Debloat](https://github.com/Raphire/Win11Debloat) avec configuration personnalisée
-- ✅ **Désinstallation propre** de toutes les versions Office préexistantes (C2R + AppX/MSIX)
-- ✅ **Installation Microsoft 365 Apps for Enterprise FR** via Office Deployment Tool
-- ✅ **Suivi de progression** en temps réel (taille téléchargée + temps écoulé)
-- ✅ **Audit antivirus** via WMI SecurityCenter2
+- ✅ **Nettoyage Bloatware** via [Raphire/Win11Debloat](https://github.com/Raphire/Win11Debloat) avec configuration personnalisée
+- ✅ **Désinstallation app microsoft / Installation Microsoft 365 Apps for Enterprise FR** via Office Deployment Tool
+- ✅ **Détection antivirus** via WMI SecurityCenter2
 - ✅ **Installation Google Chrome** via Winget
-- ✅ **Rapport horodaté** sur le Bureau avec synthèse des échecs en en-tête
-- ✅ **Retry automatique** (3 tentatives, pause 5s) sur les opérations réseau
+- ✅ **Rapport avec identifications des erreurs** sur le Bureau avec synthèse des échecs en en-tête
 - ✅ **Idempotent** : relançable sans dommage
 
 ---

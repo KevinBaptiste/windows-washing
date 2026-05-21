@@ -367,29 +367,20 @@ function Invoke-DebloatStep {
         return
     }
 
-    # Exécution silencieuse depuis le dossier extrait (dépendances trouvées via $PSScriptRoot).
-    # Win11Debloat écrit des messages informatifs sur stderr (registre, MSIX) qui, combinés
-    # à $ErrorActionPreference = 'Stop', sont levés comme exceptions. On isole donc l'appel
-    # avec un ErrorActionPreference local à 'Continue' pour ne pas faire échouer l'étape.
+    # Exécution dans un sous-processus PowerShell isolé : évite que le Clear-Host
+    # interne de Win11Debloat efface notre console parent.
     $runOk = Invoke-WithRetry -Label "$label (exec)" -Action {
-        $previousEAP = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            # Redirection complète des flux ; les "erreurs" non terminantes sont capturées comme texte.
-            $output = & $debloatPath -Silent -RemoveApps -DisableTelemetry -DisableBing *>&1 | Out-String
-
-            # Vérification du code de sortie réel du script (et non du flux stderr).
-            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-                throw "Win11Debloat ExitCode = $LASTEXITCODE"
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($output)) {
-                $extract = $output.Substring(0, [Math]::Min(500, $output.Length))
-                Write-LogEntry -Message "Win11Debloat stdout (extrait) : $extract" -Level INFO
-            }
-        }
-        finally {
-            $ErrorActionPreference = $previousEAP
+        $psArgs = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', $debloatPath,
+            '-Silent', '-RemoveApps', '-DisableTelemetry', '-DisableBing'
+        )
+        $proc = Start-Process -FilePath 'powershell.exe' `
+                              -ArgumentList $psArgs `
+                              -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -ne 0) {
+            throw "Win11Debloat ExitCode = $($proc.ExitCode)"
         }
     }
 
