@@ -1,0 +1,16 @@
+services:
+  webhook:
+    image: almir/webhook:latest
+    container_name: webhook
+    restart: unless-stopped
+    command: -verbose -hooks=/config/hooks.json -hotreload
+    volumes:
+      - ./hooks.json:/config/hooks.json:ro
+      - ./scripts:/scripts:ro
+      - ../apache/files:/opt/apache/files
+    networks:
+      - subnet1
+
+networks:
+  subnet1:
+    external: true
