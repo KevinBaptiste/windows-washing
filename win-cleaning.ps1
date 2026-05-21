@@ -7,21 +7,22 @@
 .DESCRIPTION
     Script "Plug & Play" lancé via clic-droit → "Exécuter avec PowerShell" :
       - Élévation administrateur automatique
+      - Mise à jour des sources Winget
       - Installation de PowerShell 7 via Winget (conservée mais non utilisée pour la suite)
       - Debloat Windows 11 (Win11Debloat / Raphire)
-      - Installation Microsoft 365 Apps for Entreprise FR via ODT
       - Audit de l'antivirus actif
-      - Installation Google Chrome
+      - Installation Google Chrome, VLC, Foxit PDF Reader (via Winget)
+      - Désinstallation d'Office existant (si détecté) puis installation de Microsoft 365 Apps for Entreprise FR via ODT
       - Nettoyage des fichiers temporaires
     Aucune interaction utilisateur n'est requise. Un rapport est généré sur le Bureau.
- 
+
 .EXAMPLE
     Clic-droit sur le fichier .ps1 → "Exécuter avec PowerShell".
- 
+
 .NOTES
     Auteur  : Kevin (BTST)
-    Version : 1.1.0
-    Date    : 2026-05-20
+    Version : 1.2.0
+    Date    : 2026-05-21
     Cible   : Windows 11 22H2+, PowerShell 5.1
 #>
  
@@ -249,8 +250,72 @@ function Watch-OfficeInstallProgress {
     Write-Progress -Activity "Installation Microsoft 365 Apps for Entreprise" -Completed
 }
 
+function Install-WingetPackage {
+    <#
+    .SYNOPSIS
+        Helper générique : installe un paquet Winget avec pré-check de présence et retry.
+    .DESCRIPTION
+        Vérifie d'abord la présence d'un binaire (DetectionPaths). Si déjà installé, skip.
+        Sinon, installation silencieuse via Winget avec retry, en tolérant les ExitCodes
+        "déjà présent". Centralise les arguments communs (--silent, --accept-*-agreements).
+    .PARAMETER Label
+        Libellé d'étape pour le journal et la synthèse d'échecs.
+    .PARAMETER WingetId
+        Identifiant exact du paquet Winget (ex: 'Google.Chrome').
+    .PARAMETER DisplayName
+        Nom lisible pour les logs (ex: 'Google Chrome').
+    .PARAMETER DetectionPaths
+        Chemins de binaires à tester pour skipper l'install. Vide = pas de pré-check.
+    .PARAMETER ExtraArgs
+        Arguments supplémentaires passés à winget (ex: '--scope', 'machine').
+    .PARAMETER ToleratedExitCodes
+        Codes de sortie Winget acceptés comme succès (par défaut : 0 + déjà-installé).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]   $Label,
+        [Parameter(Mandatory)] [string]   $WingetId,
+        [Parameter(Mandatory)] [string]   $DisplayName,
+        [string[]] $DetectionPaths     = @(),
+        [string[]] $ExtraArgs          = @(),
+        [int[]]    $ToleratedExitCodes = @(0, -1978335189)
+    )
+
+    Write-LogEntry -Message "$Label : démarrage" -Level INFO
+
+    # Pré-check : si un des chemins de détection existe, on skip l'install.
+    if ($DetectionPaths.Count -gt 0) {
+        $existing = $DetectionPaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if ($existing) {
+            try {
+                $ver = (Get-Item -LiteralPath $existing).VersionInfo.ProductVersion
+                Write-LogEntry -Message "$Label : $DisplayName $ver déjà installé, installation skippée." -Level SUCCESS
+            }
+            catch {
+                Write-LogEntry -Message "$Label : $DisplayName déjà installé (version non lisible), installation skippée." -Level SUCCESS
+            }
+            return
+        }
+    }
+
+    Write-LogEntry -Message "$Label : $DisplayName absent, installation via Winget." -Level INFO
+
+    $ok = Invoke-WithRetry -Label $Label -Action {
+        $wingetArgs = @('install', '--id', $WingetId,
+                        '--silent', '--accept-source-agreements', '--accept-package-agreements') + $ExtraArgs
+        & winget @wingetArgs | Out-Null
+        if ($ToleratedExitCodes -notcontains $LASTEXITCODE) {
+            throw "Winget $DisplayName ExitCode = $LASTEXITCODE"
+        }
+    }
+
+    if (-not $ok) {
+        Add-Failure -StepLabel $Label -Reason "Installation $DisplayName en échec."
+    }
+}
+
 #endregion ===========================================================================
- 
+
 #region ============================ STEPS ===========================================
  
 function Initialize-Winget {
@@ -261,7 +326,7 @@ function Initialize-Winget {
     [CmdletBinding()]
     param()
  
-    $label = "Étape 0 — Init Winget"
+    $label = "Étape 0a — Init Winget"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
  
     $ok = Invoke-WithRetry -Label $label -Action {
@@ -276,52 +341,21 @@ function Initialize-Winget {
 function Install-PowerShell7 {
     <#
     .SYNOPSIS
-        Étape 0b — Installation de PowerShell 7 via Winget.
+        Étape 0b — Installation de PowerShell 7 via Winget (scope machine).
     .DESCRIPTION
-        Vérifie d'abord la présence de pwsh.exe (chemin standard d'installation machine).
-        Si déjà présent, l'installation est skippée. Sinon, installation silencieuse via Winget.
-        L'installation est conservée pour disposer de pwsh.exe sur le poste, mais la suite
-        du script continue de s'exécuter sous PowerShell 5.1.
+        Conservée pour disposer de pwsh.exe sur le poste, mais la suite du script
+        continue de s'exécuter sous PowerShell 5.1.
+        Code -1978334957 toléré : update interdit / déjà géré par MSIX.
     #>
     [CmdletBinding()]
     param()
 
-    $label = "Étape 0 — PowerShell 7"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
-
-    # Vérification préalable : pwsh.exe présent au chemin standard d'installation machine ?
-    $pwshPath = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-    if (Test-Path -LiteralPath $pwshPath) {
-        try {
-            # Récupération de la version pour log informatif.
-            $versionOutput = & $pwshPath -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
-            Write-LogEntry -Message "$label : PowerShell $versionOutput déjà installé, installation skippée." -Level SUCCESS
-        }
-        catch {
-            Write-LogEntry -Message "$label : PowerShell 7 déjà installé (version non lisible), installation skippée." -Level SUCCESS
-        }
-        return
-    }
-
-    Write-LogEntry -Message "$label : PowerShell 7 absent, installation via Winget." -Level INFO
-
-    $ok = Invoke-WithRetry -Label $label -Action {
-        $wingetArgs = @(
-            'install', '--id', 'Microsoft.PowerShell',
-            '--silent', '--accept-source-agreements', '--accept-package-agreements',
-            '--scope', 'machine'
-        )
-        & winget @wingetArgs | Out-Null
-        # Codes tolérés : 0 (OK), -1978335189 (déjà installé), -1978334957 (update interdit / déjà géré par MSIX).
-        $toleratedCodes = @(0, -1978335189, -1978334957)
-        if ($toleratedCodes -notcontains $LASTEXITCODE) {
-            throw "Winget PowerShell ExitCode = $LASTEXITCODE"
-        }
-    }
-
-    if (-not $ok) {
-        Add-Failure -StepLabel $label -Reason "Installation PowerShell 7 en échec."
-    }
+    Install-WingetPackage -Label "Étape 0b — PowerShell 7" `
+                          -WingetId 'Microsoft.PowerShell' `
+                          -DisplayName 'PowerShell 7' `
+                          -DetectionPaths @((Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')) `
+                          -ExtraArgs @('--scope', 'machine') `
+                          -ToleratedExitCodes @(0, -1978335189, -1978334957)
 }
  
 function Invoke-DebloatStep {
@@ -433,61 +467,67 @@ function Install-GoogleChrome {
     #>
     [CmdletBinding()]
     param()
- 
-    $label = "Étape 3 — Google Chrome"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
-    $ok = Invoke-WithRetry -Label $label -Action {
-        $chromeArgs = @('install', '--id', 'Google.Chrome',
-                        '--silent', '--accept-source-agreements', '--accept-package-agreements')
-        & winget @chromeArgs | Out-Null
-        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-            throw "Winget Chrome ExitCode = $LASTEXITCODE"
-        }
-    }
- 
-    if (-not $ok) {
-        Add-Failure -StepLabel $label -Reason "Installation Google Chrome en échec."
-    }
+
+    Install-WingetPackage -Label "Étape 3 — Google Chrome" `
+                          -WingetId 'Google.Chrome' `
+                          -DisplayName 'Google Chrome' `
+                          -DetectionPaths @(
+                              (Join-Path $env:ProgramFiles        'Google\Chrome\Application\chrome.exe'),
+                              (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe')
+                          )
 }
 
 function Install-Microsoft365 {
     <#
     .SYNOPSIS
-        Étape 4 — Installation de Microsoft 365 Apps for Entreprise via ODT.
+        Étape 6 — Installation de Microsoft 365 Apps for Entreprise via ODT.
     .DESCRIPTION
-        Désinstallation des Office existants via OfficeClickToRun, puis installation
-        de Microsoft 365 Apps for Entreprise avec un fichier configuration-install.xml généré en mémoire.
+        Désinstallation conditionnelle d'Office existant (si détecté) via
+        OfficeClickToRun, suppression des AppX Office, puis installation de
+        Microsoft 365 Apps for Entreprise avec un configuration-install.xml généré.
     #>
     [CmdletBinding()]
     param()
- 
-    $label = "Étape 4 — Microsoft 365 Apps for Entreprise"
+
+    $label = "Étape 6 — Microsoft 365 Apps for Entreprise"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
-# 2.a Désinstallation des installations Office existantes (best-effort, non bloquant).
-    $c2rExe = Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
-    if (-not (Test-Path -LiteralPath $c2rExe)) {
-        $c2rExe = Join-Path $env:ProgramFiles 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
-    }
-    if (Test-Path -LiteralPath $c2rExe) {
-        Write-LogEntry -Message "$label : désinstallation Office via OfficeClickToRun." -Level INFO
-        try {
-            $proc = Start-Process -FilePath $c2rExe `
-                                  -ArgumentList 'scenario=install', 'scenariosubtype=ARP', 'sourcetype=None', 'productstoremove=AllProducts', 'culture=fr-fr', 'DisplayLevel=False' `
-                                  -Wait -PassThru
-            Write-LogEntry -Message "$label : ExitCode désinstallation = $($proc.ExitCode)" -Level INFO
+
+    # 6.a Désinstallation conditionnelle d'Office existant : on ne lance OfficeClickToRun
+    #     que si une installation Office est effectivement présente sur disque.
+    $officeMarkers = @(
+        (Join-Path $env:ProgramFiles        'Microsoft Office\root\Office16\WINWORD.EXE'),
+        (Join-Path $env:ProgramFiles        'Microsoft Office\root\Office16\EXCEL.EXE'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office\root\Office16\WINWORD.EXE'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office\root\Office16\EXCEL.EXE')
+    )
+    $officePresent = @($officeMarkers | Where-Object { Test-Path -LiteralPath $_ }).Count -gt 0
+
+    if ($officePresent) {
+        $c2rExe = Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
+        if (-not (Test-Path -LiteralPath $c2rExe)) {
+            $c2rExe = Join-Path $env:ProgramFiles 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
         }
-        catch {
-            Write-LogEntry -Message "$label : désinstallation Office non bloquante en échec — $($_.Exception.Message)" -Level WARN
+        if (Test-Path -LiteralPath $c2rExe) {
+            Write-LogEntry -Message "$label : Office détecté, désinstallation via OfficeClickToRun." -Level INFO
+            try {
+                $proc = Start-Process -FilePath $c2rExe `
+                                      -ArgumentList 'scenario=install', 'scenariosubtype=ARP', 'sourcetype=None', 'productstoremove=AllProducts', 'culture=fr-fr', 'DisplayLevel=False' `
+                                      -Wait -PassThru
+                Write-LogEntry -Message "$label : ExitCode désinstallation = $($proc.ExitCode)" -Level INFO
+            }
+            catch {
+                Write-LogEntry -Message "$label : désinstallation Office non bloquante en échec — $($_.Exception.Message)" -Level WARN
+            }
+        }
+        else {
+            Write-LogEntry -Message "$label : Office détecté mais OfficeClickToRun.exe introuvable, désinstallation skippée." -Level WARN
         }
     }
     else {
-        Write-LogEntry -Message "$label : aucun OfficeClickToRun détecté, rien à désinstaller." -Level INFO
+        Write-LogEntry -Message "$label : aucune installation Office détectée, désinstallation skippée." -Level INFO
     }
 
-    # 2.a-bis Désinstallation des paquets AppX/MSIX correspondant aux 12 apps cibles.
+    # 6.b Désinstallation des paquets AppX/MSIX correspondant aux 12 apps cibles.
     # (Access, Excel, OneDrive Groove, Skype for Business, OneDrive Desktop, OneNote,
     #  Outlook classic, Outlook new, PowerPoint, Publisher, Teams, Word).
     $appxPatterns = @(
@@ -530,7 +570,7 @@ function Install-Microsoft365 {
         }
     }
  
-    # 2.b Installation de l'Office Deployment Tool.
+    # 6.c Installation de l'Office Deployment Tool.
     $odtOk = Invoke-WithRetry -Label "$label (ODT install)" -Action {
         $odtArgs = @('install', '--id', 'Microsoft.OfficeDeploymentTool',
                      '--silent', '--accept-source-agreements', '--accept-package-agreements')
@@ -545,7 +585,7 @@ function Install-Microsoft365 {
         return
     }
  
-    # 2.c Localisation de setup.exe.
+    # 6.d Localisation de setup.exe.
     $setupPath = Find-OdtSetup
     if (-not $setupPath) {
         Add-Failure -StepLabel $label -Reason "setup.exe ODT introuvable après installation."
@@ -553,7 +593,7 @@ function Install-Microsoft365 {
     }
     Write-LogEntry -Message "$label : ODT localisé à $setupPath" -Level INFO
  
-    # 2.d Génération du XML de configuration.
+    # 6.e Génération du XML de configuration.
     $configPath = Join-Path $Script:TempDir 'configuration-install.xml'
     $xmlContent = @'
 <Configuration ID="aad1838d-35dd-4fd0-bae3-f6012e2b4113">
@@ -578,7 +618,7 @@ function Install-Microsoft365 {
 '@
     Set-Content -LiteralPath $configPath -Value $xmlContent -Encoding UTF8
  
-# 2.e Lancement de l'installation avec surveillance de la progression.
+    # 6.f Lancement de l'installation avec surveillance de la progression.
     $installOk = Invoke-WithRetry -Label "$label (M365 install)" -MaxAttempts 1 -Action {
         # -PassThru sans -Wait : on récupère le handle pour surveiller en parallèle.
         $proc = Start-Process -FilePath $setupPath `
@@ -615,122 +655,63 @@ function Install-Microsoft365 {
 function Install-VLC {
     <#
     .SYNOPSIS
-        Étape 6 — Installation silencieuse de VLC via Winget.
-    .DESCRIPTION
-        Vérifie d'abord la présence de vlc.exe (chemins standard d'installation machine).
-        Si déjà présent, l'installation est skippée. Sinon, installation silencieuse
-        de la dernière version via Winget.
+        Étape 4 — Installation silencieuse de VLC media player via Winget.
     #>
     [CmdletBinding()]
     param()
 
-    $label = "Étape 6 — VLC"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
-
-    # Vérification préalable : vlc.exe présent à un des chemins standard ?
-    $vlcCandidates = @(
-        (Join-Path $env:ProgramFiles 'VideoLAN\VLC\vlc.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'VideoLAN\VLC\vlc.exe')
-    )
-    $vlcPath = $vlcCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if ($vlcPath) {
-        try {
-            $versionOutput = (Get-Item -LiteralPath $vlcPath).VersionInfo.ProductVersion
-            Write-LogEntry -Message "$label : VLC $versionOutput déjà installé, installation skippée." -Level SUCCESS
-        }
-        catch {
-            Write-LogEntry -Message "$label : VLC déjà installé (version non lisible), installation skippée." -Level SUCCESS
-        }
-        return
-    }
-
-    Write-LogEntry -Message "$label : VLC absent, installation via Winget." -Level INFO
-
-    $ok = Invoke-WithRetry -Label $label -Action {
-        $vlcArgs = @('install', '--id', 'VideoLAN.VLC',
-                     '--silent', '--accept-source-agreements', '--accept-package-agreements')
-        & winget @vlcArgs | Out-Null
-        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-            throw "Winget VLC ExitCode = $LASTEXITCODE"
-        }
-    }
-
-    if (-not $ok) {
-        Add-Failure -StepLabel $label -Reason "Installation VLC en échec."
-    }
+    Install-WingetPackage -Label "Étape 4 — VLC" `
+                          -WingetId 'VideoLAN.VLC' `
+                          -DisplayName 'VLC' `
+                          -DetectionPaths @(
+                              (Join-Path $env:ProgramFiles        'VideoLAN\VLC\vlc.exe'),
+                              (Join-Path ${env:ProgramFiles(x86)} 'VideoLAN\VLC\vlc.exe')
+                          )
 }
 
 function Install-FoxitReader {
     <#
     .SYNOPSIS
-        Étape 8 — Installation silencieuse de Foxit PDF Reader via Winget.
-    .DESCRIPTION
-        Vérifie d'abord la présence de FoxitPDFReader.exe (chemins standard).
-        Si déjà présent, l'installation est skippée. Sinon, installation silencieuse
-        de la dernière version via Winget.
+        Étape 5 — Installation silencieuse de Foxit PDF Reader via Winget.
     #>
     [CmdletBinding()]
     param()
 
-    $label = "Étape 8 — Foxit PDF Reader"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
-
-    # Vérification préalable : binaire Foxit présent ?
-    $foxitCandidates = @(
-        (Join-Path $env:ProgramFiles        'Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
-        (Join-Path $env:ProgramFiles        'Foxit Software\Foxit Reader\FoxitReader.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Foxit Software\Foxit Reader\FoxitReader.exe')
-    )
-    $foxitPath = $foxitCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if ($foxitPath) {
-        try {
-            $versionOutput = (Get-Item -LiteralPath $foxitPath).VersionInfo.ProductVersion
-            Write-LogEntry -Message "$label : Foxit Reader $versionOutput déjà installé, installation skippée." -Level SUCCESS
-        }
-        catch {
-            Write-LogEntry -Message "$label : Foxit Reader déjà installé (version non lisible), installation skippée." -Level SUCCESS
-        }
-        return
-    }
-
-    Write-LogEntry -Message "$label : Foxit Reader absent, installation via Winget." -Level INFO
-
-    $ok = Invoke-WithRetry -Label $label -Action {
-        $foxitArgs = @('install', '--id', 'Foxit.FoxitReader',
-                       '--silent', '--accept-source-agreements', '--accept-package-agreements')
-        & winget @foxitArgs | Out-Null
-        # Winget : 0 = installé, -1978335189 = déjà présent : on tolère.
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-            throw "Winget Foxit Reader ExitCode = $LASTEXITCODE"
-        }
-    }
-
-    if (-not $ok) {
-        Add-Failure -StepLabel $label -Reason "Installation Foxit Reader en échec."
-    }
+    Install-WingetPackage -Label "Étape 5 — Foxit PDF Reader" `
+                          -WingetId 'Foxit.FoxitReader' `
+                          -DisplayName 'Foxit Reader' `
+                          -DetectionPaths @(
+                              (Join-Path $env:ProgramFiles        'Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
+                              (Join-Path ${env:ProgramFiles(x86)} 'Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
+                              (Join-Path $env:ProgramFiles        'Foxit Software\Foxit Reader\FoxitReader.exe'),
+                              (Join-Path ${env:ProgramFiles(x86)} 'Foxit Software\Foxit Reader\FoxitReader.exe')
+                          )
 }
 
 function Clear-TempArtifacts {
     <#
     .SYNOPSIS
-        Étape 5 — Nettoyage des résidus du script dans $env:TEMP.
+        Étape 7 — Nettoyage des résidus du script dans $env:TEMP.
+    .DESCRIPTION
+        Supprime le script Win11Debloat, l'archive ZIP source, le dossier extrait
+        Win11Debloat-master (plusieurs centaines de Mo) et le XML de configuration ODT.
     #>
     [CmdletBinding()]
     param()
- 
-    $label = "Étape 5 — Nettoyage"
+
+    $label = "Étape 7 — Nettoyage"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
+
     $targets = @(
         (Join-Path $Script:TempDir 'Win11Debloat.ps1'),
+        (Join-Path $Script:TempDir 'Win11Debloat.zip'),
+        (Join-Path $Script:TempDir 'Win11Debloat-master'),
         (Join-Path $Script:TempDir 'configuration-install.xml')
     )
     foreach ($t in $targets) {
         if (Test-Path -LiteralPath $t) {
             try {
-                Remove-Item -LiteralPath $t -Force -ErrorAction Stop
+                Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction Stop
                 Write-LogEntry -Message "$label : supprimé $t" -Level SUCCESS
             }
             catch {
@@ -783,15 +764,15 @@ function Write-FinalReport {
 Write-LogEntry -Message "=== Début du traitement (PowerShell 5.1) ===" -Level INFO
 Write-LogEntry -Message "Session administrateur confirmée." -Level INFO
  
-Initialize-Winget
-Install-PowerShell7
-Invoke-DebloatStep
-Get-AntivirusStatus
-Install-VLC
-Install-FoxitReader
-Install-GoogleChrome
-Install-Microsoft365
-Clear-TempArtifacts
+Initialize-Winget       # Étape 0a
+Install-PowerShell7     # Étape 0b
+Invoke-DebloatStep      # Étape 1
+Get-AntivirusStatus     # Étape 2
+Install-GoogleChrome    # Étape 3
+Install-VLC             # Étape 4
+Install-FoxitReader     # Étape 5
+Install-Microsoft365    # Étape 6
+Clear-TempArtifacts     # Étape 7
  
 Write-LogEntry -Message "=== Fin du traitement ===" -Level INFO
  
