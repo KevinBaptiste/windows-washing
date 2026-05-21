@@ -24,7 +24,7 @@
 
 ## 🎯 Présentation
 
-**Windows Washing** est un script PowerShell « plug & play » destiné aux techniciens IT qui doivent préparer rapidement plusieurs postes Windows 11. Lancé en un clic via un fichier `.bat` hébergé sur un serveur web interne, il automatise entièrement la préparation d'un poste utilisateur final : debloat, suite bureautique, audit antivirus, navigateur, sans aucune interaction humaine durant l'exécution.
+**Windows Washing** est un script PowerShell « plug & play » destiné aux techniciens IT qui doivent préparer rapidement plusieurs postes Windows 11. Lancé en un clic via un fichier `.bat` hébergé sur un serveur web, il automatise entièrement la préparation d'un poste utilisateur final : debloat, suite bureautique, audit antivirus, navigateur, sans aucune interaction humaine durant l'exécution.
 
 ### Pourquoi ce projet ?
 
@@ -53,7 +53,7 @@ La préparation d'un poste neuf prend habituellement 30 à 60 minutes de clics m
 ### Option 1 — Lancement direct depuis le serveur interne (recommandé pour techniciens)
 
 1. Sur le poste cible, ouvrir un navigateur
-2. Télécharger le `.bat` depuis votre serveur interne : `http://votre-serveur/win.bat`
+2. Télécharger le `.bat` depuis votre serveur interne : `http://SERVEUR/win.bat`
 3. Double-cliquer sur le fichier téléchargé
 4. Accepter l'UAC
 
@@ -67,7 +67,7 @@ git clone https://github.com/KevinBaptiste/windows-washing.git
 cd windows-washing
 
 # Lancer le script
-powershell -ExecutionPolicy Bypass -File .\washing-claude.ps1
+powershell -ExecutionPolicy Bypass -File .\washing.ps1
 ```
 
 ### Prérequis
@@ -88,7 +88,7 @@ powershell -ExecutionPolicy Bypass -File .\washing-claude.ps1
 
 ```
 windows-washing/
-├── washing-claude.ps1        # Script principal PowerShell 5.1
+├── washing.ps1        # Script principal PowerShell 5.1
 ├── win.bat                   # Wrapper de lancement (téléchargement + exec)
 ├── docker/
 │   └── compose.yml           # Stack Apache pour distribution interne
@@ -104,7 +104,7 @@ windows-washing/
                      │
                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│  win.bat : télécharge washing-claude.ps1 depuis GitHub   │
+│  win.bat : télécharge washing.ps1 depuis GitHub   │
 └────────────────────┬─────────────────────────────────────┘
                      │
                      ▼
