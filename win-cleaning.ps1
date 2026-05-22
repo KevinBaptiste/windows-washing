@@ -1,5 +1,4 @@
-﻿#irm https://raw.githubusercontent.com/KevinBaptiste/windows-washing/refs/heads/main/washing-claude.ps1 -OutFile $HOME\Desktop\washing.ps1 | powershell -ExecutionPolicy Bypass -File $HOME\Desktop\washing.ps1
-# Encodage : UTF-8 avec BOM (requis pour les accents sous PowerShell 5.1)
+﻿
 <#
 .SYNOPSIS
     Script de préparation automatisée d'un poste Windows 11 (exécution monobloc PowerShell 5.1).
@@ -73,7 +72,18 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 $Script:TempDir         = $env:TEMP
 $Script:DesktopPath     = [Environment]::GetFolderPath('Desktop')
 $Script:LogPath         = Join-Path $env:USERPROFILE ("Rapport_Washing_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-$Script:Win11DebloatUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/refs/heads/master/Win11Debloat.ps1'
+
+# --- Configuration Win11Debloat (pinning + config externe) ---
+# Ref Git pinnée (tag, branche, ou SHA complet). Évite la dérive de la branche master.
+# Mettre à jour manuellement après vérification d'une release upstream :
+# https://github.com/Raphire/Win11Debloat/releases
+$Script:Win11DebloatRef = 'refs/tags/v25.10.18'
+
+# Optionnel : raw URL d'un CustomAppsList.txt hébergé sur TON propre GitHub.
+# Si renseigné, le script utilise -RemoveAppsCustom au lieu de -RemoveApps (liste upstream).
+# Format : un identifiant d'AppX par ligne (ex: 'Microsoft.BingNews').
+# Exemple : 'https://raw.githubusercontent.com/<user>/<repo>/<sha>/CustomAppsList.txt'
+$Script:Win11DebloatCustomAppsListUrl = ''
  
 #endregion ===========================================================================
  
@@ -84,6 +94,7 @@ $Script:LogEntries = New-Object System.Collections.Generic.List[string]
 $Script:Failures   = New-Object System.Collections.Generic.List[string]
 $Script:AdminAccount  = $null
 $Script:AdminPassword = $null
+$Script:AdminCredPath = $null
  
 function Write-LogEntry {
     <#
@@ -217,10 +228,14 @@ function Watch-OfficeInstallProgress {
         [int] $PollSeconds = 1
     )
 
-    # Dossier cible créé par ODT. On surveille les deux emplacements possibles.
+    # Dossiers à surveiller : ODT télécharge d'abord dans le cache C2R (ProgramData)
+    # puis copie/déploie dans Program Files. Surveiller les deux donne une métrique
+    # plus fidèle dès le début du téléchargement (sinon on reste à 0 Mo plusieurs minutes).
     $officePaths = @(
         (Join-Path $env:ProgramFiles 'Microsoft Office'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office')
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office'),
+        (Join-Path $env:ProgramData 'Microsoft\ClickToRun'),
+        (Join-Path $env:ProgramData 'Microsoft\Office\ClickToRun')
     )
 
     $startTime = Get-Date
@@ -363,12 +378,29 @@ function New-AdminAccount {
         $Script:AdminAccount  = $Username
         $Script:AdminPassword = $pwd
 
-        Write-Host "Compte '$Username' créé et ajouté aux administrateurs." -ForegroundColor Green
+        # Persistance IMMÉDIATE du credential sur disque : si le script crashe plus tard,
+        # le mot de passe est déjà récupérable. Sans ça, perte définitive et poste inaccessible.
+        $credPath = Join-Path $env:USERPROFILE ("AdminCredential_{0}_{1}.txt" -f $Username, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $credContent = @"
+=== Credential administrateur local ===
+Créé par : win-cleaning.ps1
+Date     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+Machine  : $env:COMPUTERNAME
+Username : $Username
+Password : $pwd
+========================================
+"@
+        Set-Content -LiteralPath $credPath -Value $credContent -Encoding UTF8
+        $Script:AdminCredPath = $credPath
+
+        Write-LogEntry -Message "Compte '$Username' créé. Mot de passe : $pwd" -Level SUCCESS
+        Write-LogEntry -Message "Credential sauvegardé : $credPath" -Level INFO
 
         return $pwd
     }
     catch {
-        Write-Error "Erreur lors de la création : $_"
+        Write-LogEntry -Message "New-AdminAccount : échec — $($_.Exception.Message)" -Level ERROR
+        Add-Failure -StepLabel 'Étape 0 — Compte admin local' -Reason $_.Exception.Message
     }
 }
 
@@ -530,38 +562,70 @@ function Invoke-DebloatStep {
     param()
  
     $label = "Étape 1 — Win11Debloat"
-    Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
-    $debloatPath = Join-Path $Script:TempDir 'Win11Debloat.ps1'
- 
-    # Téléchargement de l'archive complète du repo (le script seul ne suffit pas :
-    # il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui).
-    $repoZipUrl  = 'https://github.com/Raphire/Win11Debloat/archive/refs/heads/master.zip'
-    $zipPath     = Join-Path $Script:TempDir 'Win11Debloat.zip'
-    $extractDir  = Join-Path $Script:TempDir 'Win11Debloat-master'
-    $debloatPath = Join-Path $extractDir 'Win11Debloat.ps1'
+    Write-LogEntry -Message "$label : démarrage (ref=$($Script:Win11DebloatRef))" -Level INFO
 
-    # Nettoyage préalable (idempotence).
-    if (Test-Path -LiteralPath $extractDir) {
-        Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    # Téléchargement de l'archive complète du repo PINNÉE à $Script:Win11DebloatRef
+    # (tag/branch/SHA). Évite la dérive de master entre deux exécutions. Le script seul ne suffit
+    # pas : il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui.
+    $repoZipUrl = "https://github.com/Raphire/Win11Debloat/archive/$($Script:Win11DebloatRef).zip"
+    $zipPath    = Join-Path $Script:TempDir 'Win11Debloat.zip'
+
+    # Nettoyage préalable de tous les dossiers Win11Debloat-* (idempotence + ref qui change).
+    Get-ChildItem -LiteralPath $Script:TempDir -Directory -Filter 'Win11Debloat-*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     }
 
-    # Téléchargement + extraction avec retry.
-    $downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
+    # Téléchargement + extraction avec retry. Le nom du dossier extrait dépend de la ref
+    # (Win11Debloat-master, Win11Debloat-25.10.18, Win11Debloat-<sha>...) → résolution dynamique.
+    $extractDir  = $null
+    $debloatPath = $null
+    $downloadOk  = Invoke-WithRetry -Label "$label (download)" -Action {
         Invoke-WebRequest -Uri $repoZipUrl -OutFile $zipPath -UseBasicParsing
         if (-not (Test-Path -LiteralPath $zipPath)) { throw "ZIP non écrit." }
         Expand-Archive -LiteralPath $zipPath -DestinationPath $Script:TempDir -Force
-        if (-not (Test-Path -LiteralPath $debloatPath)) {
-            throw "Win11Debloat.ps1 introuvable après extraction."
+
+        $extracted = Get-ChildItem -LiteralPath $Script:TempDir -Directory -Filter 'Win11Debloat-*' |
+                     Select-Object -First 1
+        if (-not $extracted) { throw "Dossier Win11Debloat-* introuvable après extraction." }
+        $Script:_DebloatExtractDir = $extracted.FullName
+        $candidate = Join-Path $extracted.FullName 'Win11Debloat.ps1'
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            throw "Win11Debloat.ps1 introuvable dans $($extracted.FullName)."
         }
+        $Script:_DebloatPath = $candidate
     }
 
     if (-not $downloadOk) {
         Add-Failure -StepLabel $label -Reason "Téléchargement Win11Debloat impossible."
         return
+    }
+    $extractDir  = $Script:_DebloatExtractDir
+    $debloatPath = $Script:_DebloatPath
+
+    # Téléchargement optionnel d'une CustomAppsList.txt depuis le GitHub utilisateur.
+    # Si succès → on bascule sur -RemoveAppsCustom (la liste upstream par défaut est ignorée).
+    $removeFlag = '-RemoveApps'
+    if ($Script:Win11DebloatCustomAppsListUrl) {
+        $customListPath = Join-Path $extractDir 'CustomAppsList.txt'
+        $customOk = Invoke-WithRetry -Label "$label (custom config)" -Action {
+            Invoke-WebRequest -Uri $Script:Win11DebloatCustomAppsListUrl -OutFile $customListPath -UseBasicParsing
+            if (-not (Test-Path -LiteralPath $customListPath)) {
+                throw "CustomAppsList.txt non écrit."
+            }
+            if ((Get-Item -LiteralPath $customListPath).Length -eq 0) {
+                throw "CustomAppsList.txt téléchargé mais vide."
+            }
+        }
+        if ($customOk) {
+            $removeFlag = '-RemoveAppsCustom'
+            Write-LogEntry -Message "$label : CustomAppsList.txt chargé depuis $($Script:Win11DebloatCustomAppsListUrl) → utilisation de -RemoveAppsCustom." -Level SUCCESS
+        }
+        else {
+            Add-Failure -StepLabel $label -Reason "CustomAppsList.txt non récupérable, repli sur la liste par défaut (-RemoveApps)."
+            Write-LogEntry -Message "$label : repli sur -RemoveApps (liste upstream)." -Level WARN
+        }
     }
 
     # Exécution dans un sous-processus PowerShell isolé : évite que le Clear-Host
@@ -571,7 +635,7 @@ function Invoke-DebloatStep {
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-File', $debloatPath,
-            '-Silent', '-RemoveApps', '-DisableTelemetry', '-DisableBing'
+            '-Silent', $removeFlag, '-DisableTelemetry', '-DisableBing'
         )
         $proc = Start-Process -FilePath 'powershell.exe' `
                               -ArgumentList $psArgs `
@@ -655,15 +719,28 @@ function Install-Microsoft365 {
     $label = "Étape 6 — Microsoft 365 Apps for Entreprise"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
 
-    # 6.a Désinstallation conditionnelle d'Office existant : on ne lance OfficeClickToRun
-    #     que si une installation Office est effectivement présente sur disque.
-    $officeMarkers = @(
-        (Join-Path $env:ProgramFiles        'Microsoft Office\root\Office16\WINWORD.EXE'),
-        (Join-Path $env:ProgramFiles        'Microsoft Office\root\Office16\EXCEL.EXE'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office\root\Office16\WINWORD.EXE'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office\root\Office16\EXCEL.EXE')
+    # 6.a Désinstallation conditionnelle d'Office existant.
+    # Détection élargie : Word/Excel ne suffisent pas (un poste avec uniquement Outlook,
+    # Visio ou Project doit aussi être détecté). On combine markers fichiers + registre C2R.
+    $officeBinaries = @('WINWORD.EXE','EXCEL.EXE','OUTLOOK.EXE','POWERPNT.EXE',
+                        'MSACCESS.EXE','ONENOTE.EXE','VISIO.EXE','MSPUB.EXE','WINPROJ.EXE')
+    $officeRoots = @(
+        (Join-Path $env:ProgramFiles        'Microsoft Office\root\Office16'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office\root\Office16')
     )
+    $officeMarkers = foreach ($root in $officeRoots) {
+        foreach ($bin in $officeBinaries) { Join-Path $root $bin }
+    }
     $officePresent = @($officeMarkers | Where-Object { Test-Path -LiteralPath $_ }).Count -gt 0
+
+    # Fallback registre : couvre les installations atypiques (Visio standalone, Project, etc.).
+    if (-not $officePresent) {
+        $c2rReg = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+        if (Test-Path -LiteralPath $c2rReg) {
+            $officePresent = $true
+            Write-LogEntry -Message "$label : Office détecté via registre C2R (fallback)." -Level INFO
+        }
+    }
 
     if ($officePresent) {
         $c2rExe = Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe'
@@ -676,14 +753,39 @@ function Install-Microsoft365 {
                 $proc = Start-Process -FilePath $c2rExe `
                                       -ArgumentList 'scenario=install', 'scenariosubtype=ARP', 'sourcetype=None', 'productstoremove=AllProducts', 'culture=fr-fr', 'DisplayLevel=False' `
                                       -Wait -PassThru
-                Write-LogEntry -Message "$label : ExitCode désinstallation = $($proc.ExitCode)" -Level INFO
+                $exitCode = $proc.ExitCode
+                Write-LogEntry -Message "$label : ExitCode désinstallation = $exitCode" -Level INFO
+
+                # OfficeClickToRun queue souvent le scénario en arrière-plan et retourne 0
+                # avant que la désinstallation soit effective. On vérifie en re-testant les markers,
+                # avec timeout. Si Office est toujours là après expiration, on abandonne M365
+                # plutôt que d'installer par-dessus (cause classique de corruption).
+                Write-LogEntry -Message "$label : attente de la fin effective de la désinstallation (timeout 10 min)..." -Level INFO
+                $deadline = (Get-Date).AddMinutes(10)
+                $stillThere = $true
+                while ((Get-Date) -lt $deadline) {
+                    Start-Sleep -Seconds 15
+                    $stillThere = @($officeMarkers | Where-Object { Test-Path -LiteralPath $_ }).Count -gt 0
+                    if (-not $stillThere) { break }
+                }
+
+                if ($stillThere) {
+                    Add-Failure -StepLabel $label -Reason "Office encore présent 10 min après désinstallation (ExitCode=$exitCode). Redémarrage probablement requis — install M365 abandonnée."
+                    Write-LogEntry -Message "$label : Office toujours détecté après désinstallation, install M365 ABANDONNÉE." -Level ERROR
+                    return
+                }
+                Write-LogEntry -Message "$label : désinstallation Office confirmée." -Level SUCCESS
             }
             catch {
-                Write-LogEntry -Message "$label : désinstallation Office non bloquante en échec — $($_.Exception.Message)" -Level WARN
+                Add-Failure -StepLabel $label -Reason "Désinstallation Office échouée : $($_.Exception.Message). Install M365 abandonnée pour éviter corruption."
+                Write-LogEntry -Message "$label : désinstallation Office échouée — $($_.Exception.Message). Install M365 abandonnée." -Level ERROR
+                return
             }
         }
         else {
-            Write-LogEntry -Message "$label : Office détecté mais OfficeClickToRun.exe introuvable, désinstallation skippée." -Level WARN
+            Add-Failure -StepLabel $label -Reason "Office détecté mais OfficeClickToRun.exe introuvable. Install M365 abandonnée."
+            Write-LogEntry -Message "$label : Office détecté mais OfficeClickToRun.exe introuvable. Install M365 ABANDONNÉE." -Level ERROR
+            return
         }
     }
     else {
@@ -901,6 +1003,19 @@ function Write-FinalReport {
     [void]$header.AppendLine("Utilisateur : $env:USERNAME")
     [void]$header.AppendLine('========================================')
     [void]$header.AppendLine('')
+    [void]$header.AppendLine('>>> COMPTE ADMINISTRATEUR LOCAL <<<')
+    if ($Script:AdminAccount -and $Script:AdminPassword) {
+        [void]$header.AppendLine("Username : $($Script:AdminAccount)")
+        [void]$header.AppendLine("Password : $($Script:AdminPassword)")
+        if ($Script:AdminCredPath) {
+            [void]$header.AppendLine("Fichier  : $($Script:AdminCredPath)")
+        }
+        [void]$header.AppendLine('⚠ Notez le mot de passe puis supprimez ce rapport et le fichier credential.')
+    }
+    else {
+        [void]$header.AppendLine('(non créé — voir synthèse des échecs ci-dessous)')
+    }
+    [void]$header.AppendLine('')
     [void]$header.AppendLine('>>> SYNTHÈSE DES ÉCHECS <<<')
     if ($Script:Failures.Count -eq 0) {
         [void]$header.AppendLine('Aucun échec détecté')
@@ -926,26 +1041,46 @@ function Write-FinalReport {
  
 Write-LogEntry -Message "=== Début du traitement (PowerShell 5.1) ===" -Level INFO
 Write-LogEntry -Message "Session administrateur confirmée." -Level INFO
- 
-Initialize-Winget       # Étape 0a
-Install-PowerShell7     # Étape 0b
-Invoke-DebloatStep      # Étape 1
-Get-AntivirusStatus     # Étape 2
-Install-GoogleChrome    # Étape 3
-Install-VLC             # Étape 4
-Install-FoxitReader     # Étape 5
-Install-Microsoft365    # Étape 6
-Clear-TempArtifacts     # Étape 7
-New-AdminAccount        # Étape 8 — création du compte admin local
- 
+
+# Ordre d'exécution : New-AdminAccount EN PREMIER (filet de sécurité critique).
+# Si une étape plante non capturée plus tard, on a déjà créé un compte admin de secours
+# avec mot de passe persisté sur disque.
+$steps = @(
+    @{ Name = 'New-AdminAccount';     Label = 'Étape 0  — Compte admin local' },
+    @{ Name = 'Initialize-Winget';    Label = 'Étape 0a — Winget' },
+    @{ Name = 'Install-PowerShell7';  Label = 'Étape 0b — PowerShell 7' },
+    @{ Name = 'Invoke-DebloatStep';   Label = 'Étape 1  — Win11Debloat' },
+    @{ Name = 'Get-AntivirusStatus';  Label = 'Étape 2  — Audit Antivirus' },
+    @{ Name = 'Install-GoogleChrome'; Label = 'Étape 3  — Google Chrome' },
+    @{ Name = 'Install-VLC';          Label = 'Étape 4  — VLC' },
+    @{ Name = 'Install-FoxitReader';  Label = 'Étape 5  — Foxit PDF Reader' },
+    @{ Name = 'Install-Microsoft365'; Label = 'Étape 6  — Microsoft 365' },
+    @{ Name = 'Clear-TempArtifacts';  Label = 'Étape 7  — Nettoyage' }
+)
+
+# Chaque étape est isolée : une exception non capturée localement ne tue plus le script
+# entier. Garantit que Write-FinalReport s'exécute toujours (donc rapport + credentials).
+foreach ($step in $steps) {
+    try {
+        & $step.Name
+    }
+    catch {
+        Write-LogEntry -Message "$($step.Label) : exception non gérée — $($_.Exception.Message)" -Level ERROR
+        Add-Failure -StepLabel $step.Label -Reason "Exception non gérée : $($_.Exception.Message)"
+    }
+}
+
 Write-LogEntry -Message "=== Fin du traitement ===" -Level INFO
 
 Write-FinalReport
 
-# Pause finale — attente d'une touche avant fermeture
-Write-Host ""
-Write-Host "Appuyez sur Entrée pour quitter..." -ForegroundColor Cyan
-Read-Host
+# Pause finale uniquement si on est en mode interactif (console utilisateur).
+# Évite le blocage en exécution non-interactive (Task Scheduler, Intune, SCCM, SSH...).
+if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+    Write-Host ""
+    Write-Host "Appuyez sur Entrée pour quitter..." -ForegroundColor Cyan
+    try { Read-Host | Out-Null } catch { }
+}
 
 #endregion ===========================================================================
 
