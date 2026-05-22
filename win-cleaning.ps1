@@ -562,70 +562,38 @@ function Invoke-DebloatStep {
     param()
  
     $label = "Étape 1 — Win11Debloat"
-    Write-LogEntry -Message "$label : démarrage (ref=$($Script:Win11DebloatRef))" -Level INFO
+    Write-LogEntry -Message "$label : démarrage" -Level INFO
+ 
+    $debloatPath = Join-Path $Script:TempDir 'Win11Debloat.ps1'
+ 
+    # Téléchargement de l'archive complète du repo (le script seul ne suffit pas :
+    # il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui).
+    $repoZipUrl  = 'https://github.com/Raphire/Win11Debloat/archive/refs/heads/master.zip'
+    $zipPath     = Join-Path $Script:TempDir 'Win11Debloat.zip'
+    $extractDir  = Join-Path $Script:TempDir 'Win11Debloat-master'
+    $debloatPath = Join-Path $extractDir 'Win11Debloat.ps1'
 
-    # Téléchargement de l'archive complète du repo PINNÉE à $Script:Win11DebloatRef
-    # (tag/branch/SHA). Évite la dérive de master entre deux exécutions. Le script seul ne suffit
-    # pas : il dépend des dossiers Scripts/, Appslists/, Config/ situés à côté de lui.
-    $repoZipUrl = "https://github.com/Raphire/Win11Debloat/archive/$($Script:Win11DebloatRef).zip"
-    $zipPath    = Join-Path $Script:TempDir 'Win11Debloat.zip'
-
-    # Nettoyage préalable de tous les dossiers Win11Debloat-* (idempotence + ref qui change).
-    Get-ChildItem -LiteralPath $Script:TempDir -Directory -Filter 'Win11Debloat-*' -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    # Nettoyage préalable (idempotence).
+    if (Test-Path -LiteralPath $extractDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     }
 
-    # Téléchargement + extraction avec retry. Le nom du dossier extrait dépend de la ref
-    # (Win11Debloat-master, Win11Debloat-25.10.18, Win11Debloat-<sha>...) → résolution dynamique.
-    $extractDir  = $null
-    $debloatPath = $null
-    $downloadOk  = Invoke-WithRetry -Label "$label (download)" -Action {
+    # Téléchargement + extraction avec retry.
+    $downloadOk = Invoke-WithRetry -Label "$label (download)" -Action {
         Invoke-WebRequest -Uri $repoZipUrl -OutFile $zipPath -UseBasicParsing
         if (-not (Test-Path -LiteralPath $zipPath)) { throw "ZIP non écrit." }
         Expand-Archive -LiteralPath $zipPath -DestinationPath $Script:TempDir -Force
-
-        $extracted = Get-ChildItem -LiteralPath $Script:TempDir -Directory -Filter 'Win11Debloat-*' |
-                     Select-Object -First 1
-        if (-not $extracted) { throw "Dossier Win11Debloat-* introuvable après extraction." }
-        $Script:_DebloatExtractDir = $extracted.FullName
-        $candidate = Join-Path $extracted.FullName 'Win11Debloat.ps1'
-        if (-not (Test-Path -LiteralPath $candidate)) {
-            throw "Win11Debloat.ps1 introuvable dans $($extracted.FullName)."
+        if (-not (Test-Path -LiteralPath $debloatPath)) {
+            throw "Win11Debloat.ps1 introuvable après extraction."
         }
-        $Script:_DebloatPath = $candidate
     }
 
     if (-not $downloadOk) {
         Add-Failure -StepLabel $label -Reason "Téléchargement Win11Debloat impossible."
         return
-    }
-    $extractDir  = $Script:_DebloatExtractDir
-    $debloatPath = $Script:_DebloatPath
-
-    # Téléchargement optionnel d'une CustomAppsList.txt depuis le GitHub utilisateur.
-    # Si succès → on bascule sur -RemoveAppsCustom (la liste upstream par défaut est ignorée).
-    $removeFlag = '-RemoveApps'
-    if ($Script:Win11DebloatCustomAppsListUrl) {
-        $customListPath = Join-Path $extractDir 'CustomAppsList.txt'
-        $customOk = Invoke-WithRetry -Label "$label (custom config)" -Action {
-            Invoke-WebRequest -Uri $Script:Win11DebloatCustomAppsListUrl -OutFile $customListPath -UseBasicParsing
-            if (-not (Test-Path -LiteralPath $customListPath)) {
-                throw "CustomAppsList.txt non écrit."
-            }
-            if ((Get-Item -LiteralPath $customListPath).Length -eq 0) {
-                throw "CustomAppsList.txt téléchargé mais vide."
-            }
-        }
-        if ($customOk) {
-            $removeFlag = '-RemoveAppsCustom'
-            Write-LogEntry -Message "$label : CustomAppsList.txt chargé depuis $($Script:Win11DebloatCustomAppsListUrl) → utilisation de -RemoveAppsCustom." -Level SUCCESS
-        }
-        else {
-            Add-Failure -StepLabel $label -Reason "CustomAppsList.txt non récupérable, repli sur la liste par défaut (-RemoveApps)."
-            Write-LogEntry -Message "$label : repli sur -RemoveApps (liste upstream)." -Level WARN
-        }
     }
 
     # Exécution dans un sous-processus PowerShell isolé : évite que le Clear-Host
@@ -635,7 +603,7 @@ function Invoke-DebloatStep {
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-File', $debloatPath,
-            '-Silent', $removeFlag, '-DisableTelemetry', '-DisableBing'
+            '-Silent', '-RemoveApps', '-DisableTelemetry', '-DisableBing'
         )
         $proc = Start-Process -FilePath 'powershell.exe' `
                               -ArgumentList $psArgs `
