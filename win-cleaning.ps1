@@ -440,22 +440,35 @@ function Initialize-Winget {
             $tmp  = $env:TEMP
             $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
 
-            # 1. VCLibs (~6 Mo)
+            # Helper : installe un appx en ignorant "version déjà présente" (0x80073D06)
+            function Add-AppxSafe {
+                param([string]$Path)
+                try {
+                    Add-AppxPackage -Path $Path -ErrorAction Stop
+                }
+                catch {
+                    if ($_.Exception.Message -match '0x80073D06' -or $_.Exception.Message -match 'ultérieure') {
+                        Write-LogEntry -Message "$label : dépendance déjà présente (ignorée) — $Path" -Level INFO
+                    }
+                    else { throw }
+                }
+            }
+
+            # 1. VCLibs
             $vcFile = Join-Path $tmp "vclibs.appx"
             Get-FileWithProgress -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vcFile -Label "VCLibs"
-            Add-AppxPackage $vcFile -ErrorAction Stop
+            Add-AppxSafe -Path $vcFile
 
-            # 2. UI.Xaml 2.8 (~4 Mo)
+            # 2. UI.Xaml 2.8
             $xamlFile = Join-Path $tmp "xaml.appx"
             Get-FileWithProgress -Uri "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.$arch.appx" -OutFile $xamlFile -Label "UI.Xaml"
-            Add-AppxPackage $xamlFile -ErrorAction Stop
+            Add-AppxSafe -Path $xamlFile
 
-            # 3. Winget (~206 Mo — le long)
+            # 3. Winget : on passe les dépendances explicitement avec -DependencyPath
             $bundleFile = Join-Path $tmp "winget.msixbundle"
             Get-FileWithProgress -Uri "https://aka.ms/getwinget" -OutFile $bundleFile -Label "Winget (~206 Mo)"
-            Add-AppxPackage $bundleFile -ErrorAction Stop
+            Add-AppxPackage -Path $bundleFile -DependencyPath $vcFile, $xamlFile -ErrorAction Stop
 
-            # Nettoyage
             Remove-Item $vcFile, $xamlFile, $bundleFile -ErrorAction SilentlyContinue
         }
 
