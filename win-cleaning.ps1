@@ -372,6 +372,45 @@ function New-AdminAccount {
     }
 }
 
+function Get-FileWithProgress {
+    param(
+        [Parameter(Mandatory)] [string]$Uri,
+        [Parameter(Mandatory)] [string]$OutFile,
+        [string]$Label = "Téléchargement"
+    )
+
+    $req = [System.Net.HttpWebRequest]::Create($Uri)
+    $req.UserAgent = "PS"
+    $resp = $req.GetResponse()
+    $totalBytes = $resp.ContentLength
+    $totalMo = [math]::Round($totalBytes / 1MB, 1)
+
+    $stream = $resp.GetResponseStream()
+    $fs = [System.IO.File]::Create($OutFile)
+
+    $buffer = New-Object byte[] 1MB
+    $readTotal = 0
+    try {
+        do {
+            $read = $stream.Read($buffer, 0, $buffer.Length)
+            $fs.Write($buffer, 0, $read)
+            $readTotal += $read
+            $moLus = [math]::Round($readTotal / 1MB, 1)
+
+            if ($totalBytes -gt 0) {
+                $pct = [math]::Round(($readTotal / $totalBytes) * 100)
+                Write-Progress -Activity $Label -Status "$moLus Mo / $totalMo Mo" -PercentComplete $pct
+            }
+            else {
+                Write-Progress -Activity $Label -Status "$moLus Mo téléchargés"
+            }
+        } while ($read -gt 0)
+    }
+    finally {
+        Write-Progress -Activity $Label -Completed
+        $fs.Close(); $stream.Close(); $resp.Close()
+    }
+}
 
 function Initialize-Winget {
     <#
@@ -398,46 +437,30 @@ function Initialize-Winget {
         Write-LogEntry -Message "$label : winget absent, tentative d'installation." -Level WARN
 
         $installOk = Invoke-WithRetry -Label "$label (install)" -Action {
-            $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
             $tmp  = $env:TEMP
+            $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
 
-            # --- Dépendance 1 : VCLibs ---
-            $vcUrl  = "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx"
-            $vcFile = Join-Path $tmp "VCLibs.$arch.appx"
-            Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing
-            Add-AppxPackage -Path $vcFile -ErrorAction Stop
+            # 1. VCLibs (~6 Mo)
+            $vcFile = Join-Path $tmp "vclibs.appx"
+            Get-FileWithProgress -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vcFile -Label "VCLibs"
+            Add-AppxPackage $vcFile -ErrorAction Stop
 
-            # --- Dépendance 2 : Microsoft.UI.Xaml 2.8 ---
-            $xamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.$arch.appx"
-            $xamlFile = Join-Path $tmp "UIXaml.2.8.$arch.appx"
-            Invoke-WebRequest -Uri $xamlUrl -OutFile $xamlFile -UseBasicParsing
-            Add-AppxPackage -Path $xamlFile -ErrorAction Stop
+            # 2. UI.Xaml 2.8 (~4 Mo)
+            $xamlFile = Join-Path $tmp "xaml.appx"
+            Get-FileWithProgress -Uri "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.$arch.appx" -OutFile $xamlFile -Label "UI.Xaml"
+            Add-AppxPackage $xamlFile -ErrorAction Stop
 
-            # --- Winget : récupération de la dernière release via l'API GitHub ---
-            $api = "https://api.github.com/repos/microsoft/winget-cli/releases/latest"
-            $rel = Invoke-RestMethod -Uri $api -UseBasicParsing -Headers @{ "User-Agent" = "PS" }
-
-            $bundleUrl  = ($rel.assets | Where-Object { $_.name -like "*.msixbundle" }).browser_download_url
-            $licenseUrl = ($rel.assets | Where-Object { $_.name -like "*License*.xml" }).browser_download_url
-
-            $bundleFile  = Join-Path $tmp "winget.msixbundle"
-            $licenseFile = Join-Path $tmp "winget_license.xml"
-            Invoke-WebRequest -Uri $bundleUrl  -OutFile $bundleFile  -UseBasicParsing
-            Invoke-WebRequest -Uri $licenseUrl -OutFile $licenseFile -UseBasicParsing
-
-            # Provisioning machine (plus robuste que Add-AppxPackage seul)
-            Add-AppxProvisionedPackage -Online `
-                -PackagePath $bundleFile `
-                -LicensePath $licenseFile `
-                -ErrorAction Stop | Out-Null
+            # 3. Winget (~206 Mo — le long)
+            $bundleFile = Join-Path $tmp "winget.msixbundle"
+            Get-FileWithProgress -Uri "https://aka.ms/getwinget" -OutFile $bundleFile -Label "Winget (~206 Mo)"
+            Add-AppxPackage $bundleFile -ErrorAction Stop
 
             # Nettoyage
-            Remove-Item $vcFile, $xamlFile, $bundleFile, $licenseFile -ErrorAction SilentlyContinue
+            Remove-Item $vcFile, $xamlFile, $bundleFile -ErrorAction SilentlyContinue
         }
 
         # Re-test après installation (le PATH peut nécessiter un rafraîchissement)
         if (-not $installOk -or -not (Test-WingetAvailable)) {
-            # Tentative de rafraîchissement du PATH dans la session courante
             $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                         [Environment]::GetEnvironmentVariable("Path", "User")
         }
