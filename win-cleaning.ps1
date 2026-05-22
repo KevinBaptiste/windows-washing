@@ -317,7 +317,58 @@ function Install-WingetPackage {
 #endregion ===========================================================================
 
 #region ============================ STEPS ===========================================
- 
+
+function New-AdminAccount {
+    [CmdletBinding()]
+    param(
+        [string]$Username = "Nlyadm",
+        [int]$Length = 24
+    )
+
+    # Vérification des droits administrateur
+    $isAdmin = ([Security.Principal.WindowsPrincipal] `
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        throw "Cette fonction nécessite des droits administrateur."
+    }
+
+    # Vérifier que le compte n'existe pas déjà
+    if (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue) {
+        throw "Le compte '$Username' existe déjà."
+    }
+
+    try {
+        # 1. Génération du mot de passe — CSPRNG compatible PS 5.1 et 7+
+        $charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#%^&*-_=+"
+        $bytes = New-Object byte[] $Length
+        $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+        $rng.GetBytes($bytes)
+        $rng.Dispose()
+        $pwd = -join ($bytes | ForEach-Object { $charset[$_ % $charset.Length] })
+        $secure = ConvertTo-SecureString $pwd -AsPlainText -Force
+
+        # 2. Création du compte local
+        New-LocalUser -Name $Username `
+                      -Password $secure `
+                      -FullName "Compte Admin $Username" `
+                      -Description "Compte administrateur local créé par script" `
+                      -PasswordNeverExpires | Out-Null
+
+        # 3. Ajout au groupe administrateurs (par SID, indépendant de la langue)
+        $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
+        Add-LocalGroupMember -Group $adminGroup -Member $Username
+
+        Write-Host "Compte '$Username' créé et ajouté aux administrateurs." -ForegroundColor Green
+
+        return $pwd
+    }
+    catch {
+        Write-Error "Erreur lors de la création : $_"
+    }
+}
+New-AdminAccount
+
 function Initialize-Winget {
     <#
     .SYNOPSIS
