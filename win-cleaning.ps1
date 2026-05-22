@@ -1,28 +1,30 @@
 ﻿
 <#
 .SYNOPSIS
-    Script de préparation automatisée d'un poste Windows 11 (exécution monobloc PowerShell 5.1).
- 
+    Script de préparation automatisée d'un poste Windows 10/11 (exécution monobloc PowerShell 5.1).
+
 .DESCRIPTION
     Script "Plug & Play" lancé via clic-droit → "Exécuter avec PowerShell" :
       - Élévation administrateur automatique
-      - Mise à jour des sources Winget
+      - Création d'un compte admin local de secours (credential persisté sur disque)
+      - Mise à jour des sources Winget (auto-install si absent)
       - Installation de PowerShell 7 via Winget (conservée mais non utilisée pour la suite)
-      - Debloat Windows 11 (Win11Debloat / Raphire)
+      - Debloat Windows (Win11Debloat / Raphire) — ref Git pinnée + CustomAppsList optionnelle
       - Audit de l'antivirus actif
       - Installation Google Chrome, VLC, Foxit PDF Reader (via Winget)
       - Désinstallation d'Office existant (si détecté) puis installation de Microsoft 365 Apps for Entreprise FR via ODT
       - Nettoyage des fichiers temporaires
-    Aucune interaction utilisateur n'est requise. Un rapport est généré sur le Bureau.
+    Aucune interaction utilisateur n'est requise. Un rapport et le credential admin
+    sont générés dans %USERPROFILE%.
 
 .EXAMPLE
     Clic-droit sur le fichier .ps1 → "Exécuter avec PowerShell".
 
 .NOTES
     Auteur  : Kevin (BTST)
-    Version : 1.2.0
-    Date    : 2026-05-21
-    Cible   : Windows 11 22H2+, PowerShell 5.1
+    Version : 1.3.0
+    Date    : 2026-05-22
+    Cible   : Windows 10 1809+ / Windows 11 22H2+, PowerShell 5.1
 #>
  
 #region ============================== BOOTSTRAP ====================================
@@ -70,7 +72,8 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
  
 # Constantes globales (déclarées avant tout usage).
 $Script:TempDir         = $env:TEMP
-$Script:DesktopPath     = [Environment]::GetFolderPath('Desktop')
+# Rapport ET credential sont stockés côte-à-côte dans $env:USERPROFILE.
+# Le credential dérive du dossier de $Script:LogPath dans New-AdminAccount → couplage garanti.
 $Script:LogPath         = Join-Path $env:USERPROFILE ("Rapport_Washing_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
 # --- Configuration Win11Debloat (pinning + config externe) ---
@@ -380,7 +383,9 @@ function New-AdminAccount {
 
         # Persistance IMMÉDIATE du credential sur disque : si le script crashe plus tard,
         # le mot de passe est déjà récupérable. Sans ça, perte définitive et poste inaccessible.
-        $credPath = Join-Path $env:USERPROFILE ("AdminCredential_{0}_{1}.txt" -f $Username, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        # Stocké dans le même dossier que le rapport ($Script:LogPath) pour les retrouver côte-à-côte.
+        $credDir  = Split-Path -Parent $Script:LogPath
+        $credPath = Join-Path $credDir ("AdminCredential_{0}_{1}.txt" -f $Username, (Get-Date -Format 'yyyyMMdd_HHmmss'))
         $credContent = @"
 === Credential administrateur local ===
 Créé par : win-cleaning.ps1
@@ -449,6 +454,19 @@ function Initialize-Winget {
     .SYNOPSIS
         Étape 0a — Garantit la présence de Winget (installe dépendances + winget si absent),
         puis met à jour les sources. Compatible Windows 10 / 11.
+    .NOTES
+        Cas tordu fréquent (vu en prod 2026-05-22) :
+        Microsoft.DesktopAppInstaller est déjà installé pour AllUsers en version
+        supérieure à celle d'aka.ms/getwinget → installer le bundle déclenche 0x80073D06
+        ("version ultérieure déjà installée"). Même chose pour les VCLibs/UI.Xaml.
+        En plus, même quand le paquet est là, son shim PATH n'est pas toujours propagé
+        au compte courant (compte fraîchement créé / admin built-in).
+        Ce code :
+          1) détecte les déps déjà installées via Get-AppxPackage → évite le téléchargement
+             ET évite -DependencyPath (cause de 0x80073D06)
+          2) tolère 0x80073D06 sur le bundle (succès déguisé)
+          3) localise winget.exe via Get-AppxPackage et l'ajoute au PATH session
+             si Get-Command winget échoue
     #>
     [CmdletBinding()]
     param()
@@ -456,12 +474,40 @@ function Initialize-Winget {
     $label = "Étape 0a — Init Winget"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
 
-    # --- Sous-fonction interne : test de disponibilité ---
+    # --- Sous-fonctions internes ---
     function Test-WingetAvailable {
         $null -ne (Get-Command winget -ErrorAction SilentlyContinue)
     }
 
-    # --- 1. Si winget déjà présent, on saute l'installation ---
+    function Update-CurrentPath {
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                    [Environment]::GetEnvironmentVariable("Path", "User")
+    }
+
+    function Resolve-WingetFromAppx {
+        # Si le paquet AppX est installé mais le shim PATH non propagé, retourne le dossier
+        # contenant winget.exe pour qu'on l'ajoute manuellement au PATH session.
+        try {
+            $pkg = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction SilentlyContinue |
+                   Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $pkg) { return $null }
+            $exe = Join-Path $pkg.InstallLocation 'winget.exe'
+            if (Test-Path -LiteralPath $exe) { return $pkg.InstallLocation }
+        }
+        catch { }
+        return $null
+    }
+
+    # --- 1. Disponibilité initiale (PATH actuel → refresh PATH → fallback AppX) ---
+    if (-not (Test-WingetAvailable)) { Update-CurrentPath }
+    if (-not (Test-WingetAvailable)) {
+        $wingetDir = Resolve-WingetFromAppx
+        if ($wingetDir) {
+            $env:Path = "$wingetDir;$env:Path"
+            Write-LogEntry -Message "$label : winget localisé via AppX, ajouté au PATH session : $wingetDir" -Level INFO
+        }
+    }
+
     if (Test-WingetAvailable) {
         Write-LogEntry -Message "$label : winget déjà présent ($((winget --version) 2>$null))." -Level INFO
     }
@@ -472,7 +518,7 @@ function Initialize-Winget {
             $tmp  = $env:TEMP
             $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
 
-            # Helper : installe un appx en ignorant "version déjà présente" (0x80073D06)
+            # Tolère HRESULT 0x80073D06 (version ultérieure déjà installée → succès).
             function Add-AppxSafe {
                 param([string]$Path)
                 try {
@@ -480,38 +526,82 @@ function Initialize-Winget {
                 }
                 catch {
                     if ($_.Exception.Message -match '0x80073D06' -or $_.Exception.Message -match 'ultérieure') {
-                        Write-LogEntry -Message "$label : dépendance déjà présente (ignorée) — $Path" -Level INFO
+                        Write-LogEntry -Message "$label : déjà présent en version >= (ignoré) — $Path" -Level INFO
                     }
                     else { throw }
                 }
             }
 
-            # 1. VCLibs
-            $vcFile = Join-Path $tmp "vclibs.appx"
-            Get-FileWithProgress -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vcFile -Label "VCLibs"
-            Add-AppxSafe -Path $vcFile
+            # Détection des déps déjà installées : on évite le download ET on évite
+            # de les passer en -DependencyPath (sinon 0x80073D06 si la version système
+            # est supérieure à celle qu'on téléchargerait).
+            $vcExisting = Get-AppxPackage -AllUsers -Name 'Microsoft.VCLibs.140.00.UWPDesktop' -ErrorAction SilentlyContinue |
+                          Sort-Object Version -Descending | Select-Object -First 1
+            $xamlExisting = Get-AppxPackage -AllUsers -Name 'Microsoft.UI.Xaml.2.8' -ErrorAction SilentlyContinue |
+                            Sort-Object Version -Descending | Select-Object -First 1
 
-            # 2. UI.Xaml 2.8
-            $xamlFile = Join-Path $tmp "xaml.appx"
-            Get-FileWithProgress -Uri "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.$arch.appx" -OutFile $xamlFile -Label "UI.Xaml"
-            Add-AppxSafe -Path $xamlFile
+            $depPaths = @()
+            $vcFile = $null; $xamlFile = $null
 
-            # 3. Winget : on passe les dépendances explicitement avec -DependencyPath
+            if ($vcExisting) {
+                Write-LogEntry -Message "$label : VCLibs déjà installé (v$($vcExisting.Version))." -Level INFO
+            }
+            else {
+                $vcFile = Join-Path $tmp "vclibs.appx"
+                Get-FileWithProgress -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vcFile -Label "VCLibs"
+                Add-AppxSafe -Path $vcFile
+                $depPaths += $vcFile
+            }
+
+            if ($xamlExisting) {
+                Write-LogEntry -Message "$label : UI.Xaml 2.8 déjà installé (v$($xamlExisting.Version))." -Level INFO
+            }
+            else {
+                $xamlFile = Join-Path $tmp "xaml.appx"
+                Get-FileWithProgress -Uri "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.$arch.appx" -OutFile $xamlFile -Label "UI.Xaml"
+                Add-AppxSafe -Path $xamlFile
+                $depPaths += $xamlFile
+            }
+
             $bundleFile = Join-Path $tmp "winget.msixbundle"
             Get-FileWithProgress -Uri "https://aka.ms/getwinget" -OutFile $bundleFile -Label "Winget (~206 Mo)"
-            Add-AppxPackage -Path $bundleFile -DependencyPath $vcFile, $xamlFile -ErrorAction Stop
 
-            Remove-Item $vcFile, $xamlFile, $bundleFile -ErrorAction SilentlyContinue
+            try {
+                if ($depPaths.Count -gt 0) {
+                    Add-AppxPackage -Path $bundleFile -DependencyPath $depPaths -ErrorAction Stop
+                }
+                else {
+                    # Toutes les déps déjà présentes → ne pas passer -DependencyPath.
+                    Add-AppxPackage -Path $bundleFile -ErrorAction Stop
+                }
+            }
+            catch {
+                if ($_.Exception.Message -match '0x80073D06' -or $_.Exception.Message -match 'ultérieure') {
+                    Write-LogEntry -Message "$label : bundle winget déjà présent en version >= (ignoré)." -Level INFO
+                }
+                else { throw }
+            }
+
+            # Cleanup ($vcFile/$xamlFile sont $null si le download a été skippé).
+            foreach ($p in @($vcFile, $xamlFile, $bundleFile)) {
+                if ($p -and (Test-Path -LiteralPath $p)) {
+                    Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
 
-        # Re-test après installation (le PATH peut nécessiter un rafraîchissement)
-        if (-not $installOk -or -not (Test-WingetAvailable)) {
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                        [Environment]::GetEnvironmentVariable("Path", "User")
+        # Re-test : refresh PATH puis fallback AppX (le shim n'est pas toujours propagé).
+        Update-CurrentPath
+        if (-not (Test-WingetAvailable)) {
+            $wingetDir = Resolve-WingetFromAppx
+            if ($wingetDir) {
+                $env:Path = "$wingetDir;$env:Path"
+                Write-LogEntry -Message "$label : winget localisé via AppX post-install : $wingetDir" -Level INFO
+            }
         }
 
         if (Test-WingetAvailable) {
-            Write-LogEntry -Message "$label : winget installé avec succès." -Level INFO
+            Write-LogEntry -Message "$label : winget installé avec succès." -Level SUCCESS
         }
         else {
             Add-Failure -StepLabel $label -Reason "Installation de winget échouée (dépendances ou contexte d'exécution)."
@@ -957,7 +1047,7 @@ function Clear-TempArtifacts {
 function Write-FinalReport {
     <#
     .SYNOPSIS
-        Génère le rapport final sur le Bureau avec synthèse des échecs en en-tête.
+        Génère le rapport final dans %USERPROFILE% avec synthèse des échecs en en-tête.
     #>
     [CmdletBinding()]
     param()
