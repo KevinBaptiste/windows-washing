@@ -72,7 +72,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 # Constantes globales (déclarées avant tout usage).
 $Script:TempDir         = $env:TEMP
 $Script:DesktopPath     = [Environment]::GetFolderPath('Desktop')
-$Script:LogPath         = Join-Path $Script:DesktopPath ("PrepW11_Rapport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+$Script:LogPath         = Join-Path $env:USERPROFILE ("Rapport_Washing_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 $Script:Win11DebloatUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloat/refs/heads/master/Win11Debloat.ps1'
  
 #endregion ===========================================================================
@@ -82,6 +82,8 @@ $Script:Win11DebloatUrl = 'https://raw.githubusercontent.com/Raphire/Win11Debloa
 # Collection d'événements journalisés ; les échecs sont synthétisés en tête de rapport.
 $Script:LogEntries = New-Object System.Collections.Generic.List[string]
 $Script:Failures   = New-Object System.Collections.Generic.List[string]
+$Script:AdminAccount  = $null
+$Script:AdminPassword = $null
  
 function Write-LogEntry {
     <#
@@ -358,6 +360,8 @@ function New-AdminAccount {
         # 3. Ajout au groupe administrateurs (par SID, indépendant de la langue)
         $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
         Add-LocalGroupMember -Group $adminGroup -Member $Username
+        $Script:AdminAccount  = $Username
+        $Script:AdminPassword = $pwd
 
         Write-Host "Compte '$Username' créé et ajouté aux administrateurs." -ForegroundColor Green
 
@@ -367,7 +371,7 @@ function New-AdminAccount {
         Write-Error "Erreur lors de la création : $_"
     }
 }
-New-AdminAccount
+
 
 function Initialize-Winget {
     <#
@@ -824,11 +828,17 @@ Install-VLC             # Étape 4
 Install-FoxitReader     # Étape 5
 Install-Microsoft365    # Étape 6
 Clear-TempArtifacts     # Étape 7
+New-AdminAccount        # Étape 8 — création du compte admin local
  
 Write-LogEntry -Message "=== Fin du traitement ===" -Level INFO
- 
+
 Write-FinalReport
- 
+
+# Pause finale — attente d'une touche avant fermeture
+Write-Host ""
+Write-Host "Appuyez sur Entrée pour quitter..." -ForegroundColor Cyan
+Read-Host
+
 #endregion ===========================================================================
- 
+
 exit 0
