@@ -376,21 +376,93 @@ function New-AdminAccount {
 function Initialize-Winget {
     <#
     .SYNOPSIS
-        Étape 0a — Mise à jour des sources Winget.
+        Étape 0a — Garantit la présence de Winget (installe dépendances + winget si absent),
+        puis met à jour les sources. Compatible Windows 10 / 11.
     #>
     [CmdletBinding()]
     param()
- 
+
     $label = "Étape 0a — Init Winget"
     Write-LogEntry -Message "$label : démarrage" -Level INFO
- 
-    $ok = Invoke-WithRetry -Label $label -Action {
+
+    # --- Sous-fonction interne : test de disponibilité ---
+    function Test-WingetAvailable {
+        $null -ne (Get-Command winget -ErrorAction SilentlyContinue)
+    }
+
+    # --- 1. Si winget déjà présent, on saute l'installation ---
+    if (Test-WingetAvailable) {
+        Write-LogEntry -Message "$label : winget déjà présent ($((winget --version) 2>$null))." -Level INFO
+    }
+    else {
+        Write-LogEntry -Message "$label : winget absent, tentative d'installation." -Level WARN
+
+        $installOk = Invoke-WithRetry -Label "$label (install)" -Action {
+            $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
+            $tmp  = $env:TEMP
+
+            # --- Dépendance 1 : VCLibs ---
+            $vcUrl  = "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx"
+            $vcFile = Join-Path $tmp "VCLibs.$arch.appx"
+            Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing
+            Add-AppxPackage -Path $vcFile -ErrorAction Stop
+
+            # --- Dépendance 2 : Microsoft.UI.Xaml 2.8 ---
+            $xamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.$arch.appx"
+            $xamlFile = Join-Path $tmp "UIXaml.2.8.$arch.appx"
+            Invoke-WebRequest -Uri $xamlUrl -OutFile $xamlFile -UseBasicParsing
+            Add-AppxPackage -Path $xamlFile -ErrorAction Stop
+
+            # --- Winget : récupération de la dernière release via l'API GitHub ---
+            $api = "https://api.github.com/repos/microsoft/winget-cli/releases/latest"
+            $rel = Invoke-RestMethod -Uri $api -UseBasicParsing -Headers @{ "User-Agent" = "PS" }
+
+            $bundleUrl  = ($rel.assets | Where-Object { $_.name -like "*.msixbundle" }).browser_download_url
+            $licenseUrl = ($rel.assets | Where-Object { $_.name -like "*License*.xml" }).browser_download_url
+
+            $bundleFile  = Join-Path $tmp "winget.msixbundle"
+            $licenseFile = Join-Path $tmp "winget_license.xml"
+            Invoke-WebRequest -Uri $bundleUrl  -OutFile $bundleFile  -UseBasicParsing
+            Invoke-WebRequest -Uri $licenseUrl -OutFile $licenseFile -UseBasicParsing
+
+            # Provisioning machine (plus robuste que Add-AppxPackage seul)
+            Add-AppxProvisionedPackage -Online `
+                -PackagePath $bundleFile `
+                -LicensePath $licenseFile `
+                -ErrorAction Stop | Out-Null
+
+            # Nettoyage
+            Remove-Item $vcFile, $xamlFile, $bundleFile, $licenseFile -ErrorAction SilentlyContinue
+        }
+
+        # Re-test après installation (le PATH peut nécessiter un rafraîchissement)
+        if (-not $installOk -or -not (Test-WingetAvailable)) {
+            # Tentative de rafraîchissement du PATH dans la session courante
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                        [Environment]::GetEnvironmentVariable("Path", "User")
+        }
+
+        if (Test-WingetAvailable) {
+            Write-LogEntry -Message "$label : winget installé avec succès." -Level INFO
+        }
+        else {
+            Add-Failure -StepLabel $label -Reason "Installation de winget échouée (dépendances ou contexte d'exécution)."
+            return $false
+        }
+    }
+
+    # --- 2. Mise à jour des sources ---
+    $ok = Invoke-WithRetry -Label "$label (sources)" -Action {
         winget source update --accept-source-agreements | Out-Null
     }
- 
+
     if (-not $ok) {
         Add-Failure -StepLabel $label -Reason "Mise à jour des sources Winget impossible."
+        return $false
     }
+
+    Write-LogEntry -Message "$label : terminé." -Level INFO
+    return $true
 }
  
 function Install-PowerShell7 {
