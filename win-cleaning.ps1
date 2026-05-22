@@ -353,11 +353,6 @@ function New-AdminAccount {
         throw "Cette fonction nécessite des droits administrateur."
     }
 
-    # Vérifier que le compte n'existe pas déjà
-    if (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue) {
-        throw "Le compte '$Username' existe déjà."
-    }
-
     try {
         # 1. Génération du mot de passe — CSPRNG compatible PS 5.1 et 7+
         $charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#%^&*-_=+"
@@ -368,16 +363,36 @@ function New-AdminAccount {
         $pwd = -join ($bytes | ForEach-Object { $charset[$_ % $charset.Length] })
         $secure = ConvertTo-SecureString $pwd -AsPlainText -Force
 
-        # 2. Création du compte local
-        New-LocalUser -Name $Username `
-                      -Password $secure `
-                      -FullName "Compte Admin $Username" `
-                      -Description "Compte administrateur local créé par script" `
-                      -PasswordNeverExpires | Out-Null
+        # 2. Création OU mise à jour du compte (idempotence : le script peut être
+        #    relancé sur un poste où Nlyadm existe déjà d'un run précédent — on
+        #    reset le mot de passe au lieu de planter et verrouiller le poste).
+        $existingUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+        if ($existingUser) {
+            Set-LocalUser -Name $Username -Password $secure
+            Set-LocalUser -Name $Username -PasswordNeverExpires $true
+            Write-LogEntry -Message "Compte '$Username' existait déjà — mot de passe réinitialisé." -Level WARN
+        }
+        else {
+            New-LocalUser -Name $Username `
+                          -Password $secure `
+                          -FullName "Compte Admin $Username" `
+                          -Description "Compte administrateur local créé par script" `
+                          -PasswordNeverExpires | Out-Null
+            Write-LogEntry -Message "Compte '$Username' créé." -Level SUCCESS
+        }
 
-        # 3. Ajout au groupe administrateurs (par SID, indépendant de la langue)
+        # 3. Ajout au groupe Administrateurs (idempotent : skip si déjà membre).
         $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
-        Add-LocalGroupMember -Group $adminGroup -Member $Username
+        $alreadyMember = Get-LocalGroupMember -Group $adminGroup -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Name -like "*\$Username" -or $_.Name -eq $Username }
+        if (-not $alreadyMember) {
+            Add-LocalGroupMember -Group $adminGroup -Member $Username
+            Write-LogEntry -Message "Compte '$Username' ajouté au groupe Administrateurs." -Level SUCCESS
+        }
+        else {
+            Write-LogEntry -Message "Compte '$Username' déjà membre du groupe Administrateurs." -Level INFO
+        }
+
         $Script:AdminAccount  = $Username
         $Script:AdminPassword = $pwd
 
@@ -485,18 +500,47 @@ function Initialize-Winget {
     }
 
     function Resolve-WingetFromAppx {
-        # Si le paquet AppX est installé mais le shim PATH non propagé, retourne le dossier
-        # contenant winget.exe pour qu'on l'ajoute manuellement au PATH session.
+        # Localise le dossier contenant winget.exe via 3 stratégies (du plus rapide
+        # au plus brutal), pour gérer les cas où le sous-système AppX est cassé
+        # (HRESULT 0x800706FD / trust LSA).
+
+        # 1) Via Get-AppxPackage (rapide, échoue si AppX cassé)
         try {
-            $pkg = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction SilentlyContinue |
+            $pkg = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop |
                    Sort-Object Version -Descending | Select-Object -First 1
-            if (-not $pkg) { return $null }
-            $exe = Join-Path $pkg.InstallLocation 'winget.exe'
-            if (Test-Path -LiteralPath $exe) { return $pkg.InstallLocation }
+            if ($pkg) {
+                $exe = Join-Path $pkg.InstallLocation 'winget.exe'
+                if (Test-Path -LiteralPath $exe) { return $pkg.InstallLocation }
+            }
+        }
+        catch {
+            Write-LogEntry -Message "$label : Get-AppxPackage indisponible ($($_.Exception.Message)), fallback filesystem." -Level WARN
+        }
+
+        # 2) Scan direct de C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*
+        #    (contourne complètement le sous-système AppX)
+        try {
+            $appxRoot = Join-Path $env:ProgramFiles 'WindowsApps'
+            if (Test-Path -LiteralPath $appxRoot) {
+                $candidate = Get-ChildItem -LiteralPath $appxRoot -Directory -Filter 'Microsoft.DesktopAppInstaller_*' -Force -ErrorAction SilentlyContinue |
+                             Sort-Object Name -Descending | Select-Object -First 1
+                if ($candidate) {
+                    $exe = Join-Path $candidate.FullName 'winget.exe'
+                    if (Test-Path -LiteralPath $exe) { return $candidate.FullName }
+                }
+            }
         }
         catch { }
+
+        # 3) Shim per-user dans LocalAppData
+        $shim = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+        if (Test-Path -LiteralPath $shim) {
+            return (Split-Path -Parent $shim)
+        }
+
         return $null
     }
+
 
     # --- 1. Disponibilité initiale (PATH actuel → refresh PATH → fallback AppX) ---
     if (-not (Test-WingetAvailable)) { Update-CurrentPath }
@@ -532,13 +576,33 @@ function Initialize-Winget {
                 }
             }
 
+            # Wrapper sûr : tolère un sous-système AppX cassé (HRESULT 0x800706FD —
+            # erreur LSA trust LSA vue en prod sur certains Win10) en retournant $null
+            # au lieu de propager l'exception. Fallback AllUsers → User scope.
+            function Get-InstalledAppxVersion {
+                param([string]$Name)
+                foreach ($useAllUsers in @($true, $false)) {
+                    try {
+                        $pkg = if ($useAllUsers) {
+                            Get-AppxPackage -AllUsers -Name $Name -ErrorAction Stop
+                        } else {
+                            Get-AppxPackage -Name $Name -ErrorAction Stop
+                        }
+                        if ($pkg) {
+                            return ($pkg | Sort-Object Version -Descending | Select-Object -First 1)
+                        }
+                        return $null
+                    }
+                    catch { continue }
+                }
+                return $null
+            }
+
             # Détection des déps déjà installées : on évite le download ET on évite
             # de les passer en -DependencyPath (sinon 0x80073D06 si la version système
             # est supérieure à celle qu'on téléchargerait).
-            $vcExisting = Get-AppxPackage -AllUsers -Name 'Microsoft.VCLibs.140.00.UWPDesktop' -ErrorAction SilentlyContinue |
-                          Sort-Object Version -Descending | Select-Object -First 1
-            $xamlExisting = Get-AppxPackage -AllUsers -Name 'Microsoft.UI.Xaml.2.8' -ErrorAction SilentlyContinue |
-                            Sort-Object Version -Descending | Select-Object -First 1
+            $vcExisting   = Get-InstalledAppxVersion 'Microsoft.VCLibs.140.00.UWPDesktop'
+            $xamlExisting = Get-InstalledAppxVersion 'Microsoft.UI.Xaml.2.8'
 
             $depPaths = @()
             $vcFile = $null; $xamlFile = $null
